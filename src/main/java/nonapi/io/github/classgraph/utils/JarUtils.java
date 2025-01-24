@@ -64,6 +64,9 @@ public final class JarUtils {
     /** The Constant TRAILING_DOTS. */
     private static final Pattern TRAILING_DOTS = Pattern.compile("\\.$");
 
+    /** The Constant DOUBLE_BACKSHLASH_WITH_COLON. */
+    private static final Pattern DOUBLE_BACKSHLASH_WITH_COLON = Pattern.compile("\\\\:");
+
     /**
      * On everything but Windows, where the path separator is ':', need to treat the colon in these substrings as
      * non-separators, when at the beginning of the string or following a ':'.
@@ -193,7 +196,7 @@ public final class JarUtils {
                 final int idx1 = splitPointsSorted.get(i);
                 // Trim, and unescape "\\:"
                 String part = pathStr.substring(idx0 + 1, idx1).trim();
-                part = part.replaceAll("\\\\:", ":");
+                part = DOUBLE_BACKSHLASH_WITH_COLON.matcher(part).replaceAll( ":");
                 // Remove empty path components
                 if (!part.isEmpty()) {
                     parts.add(part);
