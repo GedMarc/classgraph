@@ -31,7 +31,7 @@ package io.github.classgraph.issues.issue128;
 import static org.assertj.core.api.Assertions.assertThat;
 
 import java.io.IOException;
-import java.io.InputStream;
+import java.net.HttpURLConnection;
 import java.net.URL;
 import java.net.URLClassLoader;
 import java.util.List;
@@ -45,14 +45,14 @@ import io.github.classgraph.ScanResult;
  * Issue128Test.
  */
 public class Issue128Test {
-    /** The Constant SITE. */
-    private static final String SITE = "https://github.com/classgraph";
+    /** The site. */
+    private static final String SITE = "https://raw.githubusercontent.com/classgraph";
 
-    /** The Constant JAR_URL. */
+    /** The jar URL. */
     private static final String JAR_URL = SITE + //
-            "/classgraph/blob/master/src/test/resources/nested-jars-level1.zip?raw=true";
+            "/classgraph/latest/src/test/resources/nested-jars-level1.zip";
 
-    /** The Constant NESTED_JAR_URL. */
+    /** The nested jar URL. */
     private static final String NESTED_JAR_URL = //
             JAR_URL + "!level2.jar!level3.jar!classpath1/classpath2";
 
@@ -72,9 +72,22 @@ public class Issue128Test {
             final List<String> filesInsideLevel3 = scanResult.getAllResources().getPaths();
             if (filesInsideLevel3.isEmpty()) {
                 // If there were no files inside jar, it is possible that remote jar could not be downloaded
-                try (InputStream is = jarURL.openStream()) {
-                    throw new Exception("Able to download remote jar, but could not find files within jar");
-                } catch (final IOException e) {
+                try {
+                    final HttpURLConnection connection = (HttpURLConnection) jarURL.openConnection();
+                    connection.setRequestMethod("GET");
+                    connection.setConnectTimeout(2000);
+                    connection.connect();
+                    final int code = connection.getResponseCode();
+                    if (code != 200) {
+                        throw new Exception(
+                                "Got bad response code " + code + " when trying to fetch URL " + jarURL);
+                    } else {
+                        throw new Exception("Able to download remote jar, but could not find files within jar");
+                    }
+                } catch (final java.net.SocketTimeoutException e) {
+                    System.err.println("Timeout while trying to download remote jar, skipping test "
+                            + Issue128Test.class.getName() + ": " + e);
+                } catch (final IOException | SecurityException e) {
                     System.err.println("Could not download remote jar, skipping test "
                             + Issue128Test.class.getName() + ": " + e);
                 }

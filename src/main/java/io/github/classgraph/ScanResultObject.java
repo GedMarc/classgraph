@@ -32,11 +32,12 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
+import nonapi.io.github.classgraph.utils.LogNode;
+
 /**
  * A superclass of objects accessible from a {@link ScanResult} that are associated with a {@link ClassInfo} object.
  */
 abstract class ScanResultObject {
-
     /** The scan result. */
     transient protected ScanResult scanResult;
 
@@ -45,6 +46,8 @@ abstract class ScanResultObject {
 
     /** The class ref, once the class is loaded. */
     protected transient Class<?> classRef;
+
+    // -------------------------------------------------------------------------------------------------------------
 
     /**
      * Set ScanResult backreferences in info objects after scan has completed.
@@ -59,12 +62,14 @@ abstract class ScanResultObject {
     /**
      * Get {@link ClassInfo} objects for any classes referenced by this object.
      *
+     * @param log
+     *            the log
      * @return the referenced class info.
      */
-    final Set<ClassInfo> findReferencedClassInfo() {
+    final Set<ClassInfo> findReferencedClassInfo(final LogNode log) {
         final Set<ClassInfo> refdClassInfo = new LinkedHashSet<>();
         if (scanResult != null) {
-            findReferencedClassInfo(scanResult.classNameToClassInfo, refdClassInfo);
+            findReferencedClassInfo(scanResult.classNameToClassInfo, refdClassInfo, log);
         }
         return refdClassInfo;
     }
@@ -76,14 +81,18 @@ abstract class ScanResultObject {
      *            the map from class name to {@link ClassInfo}.
      * @param refdClassInfo
      *            the referenced class info
+     * @param log
+     *            the log
      */
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
         final ClassInfo ci = getClassInfo();
         if (ci != null) {
             refdClassInfo.add(ci);
         }
     }
+
+    // -------------------------------------------------------------------------------------------------------------
 
     /**
      * The name of the class (used by {@link #getClassInfo()} to fetch the {@link ClassInfo} object for the class).
@@ -142,6 +151,8 @@ abstract class ScanResultObject {
         return className;
     }
 
+    // -------------------------------------------------------------------------------------------------------------
+
     /**
      * Load the class named returned by {@link #getClassInfo()}, or if that returns null, the class named by
      * {@link #getClassName()}. Returns a {@code Class<?>} reference for the class, cast to the requested superclass
@@ -159,24 +170,28 @@ abstract class ScanResultObject {
      *             if the class could not be loaded or cast, and ignoreExceptions was false.
      */
     <T> Class<T> loadClass(final Class<T> superclassOrInterfaceType, final boolean ignoreExceptions) {
-        if (classRef == null) {
-            final String className = getClassInfoNameOrClassName();
-            if (scanResult != null) {
-                classRef = scanResult.loadClass(className, superclassOrInterfaceType, ignoreExceptions);
-            } else {
-                // Fallback, if scanResult is not set
+        synchronized (this) {
+            // If class is not already loaded, try loading class
+            if (classRef == null) {
+                final String className = getClassInfoNameOrClassName();
                 try {
-                    classRef = Class.forName(className);
+                    classRef = scanResult != null
+                            ? scanResult.loadClass(className, superclassOrInterfaceType, ignoreExceptions)
+                            // Fallback, if scanResult is not set
+                            : Class.forName(className);
+                    if (classRef == null && !ignoreExceptions) {
+                        throw new IllegalArgumentException("Could not load class " + className);
+                    }
                 } catch (final Throwable t) {
                     if (!ignoreExceptions) {
                         throw new IllegalArgumentException("Could not load class " + className, t);
                     }
                 }
             }
+            @SuppressWarnings("unchecked")
+            final Class<T> classT = (Class<T>) classRef;
+            return classT;
         }
-        @SuppressWarnings("unchecked")
-        final Class<T> classT = (Class<T>) classRef;
-        return classT;
     }
 
     /**
@@ -231,12 +246,61 @@ abstract class ScanResultObject {
      * Load the class named returned by {@link #getClassInfo()}, or if that returns null, the class named by
      * {@link #getClassName()}. Returns a {@code Class<?>} reference for the class.
      * 
-     * @return The {@code Class<?>} reference for the referenced class, or null if the class could not be loaded and
-     *         ignoreExceptions is true.
+     * @return The {@code Class<?>} reference for the referenced class.
      * @throws IllegalArgumentException
-     *             if the class could not be loaded and ignoreExceptions was false.
+     *             if the class could not be loaded.
      */
     Class<?> loadClass() {
         return loadClass(/* ignoreExceptions = */ false);
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    /**
+     * Render to string.
+     *
+     * @param useSimpleNames
+     *            if true, use just the simple name of each class.
+     * @param buf
+     *            the buf
+     */
+    protected abstract void toString(final boolean useSimpleNames, StringBuilder buf);
+
+    /**
+     * Render to string, with simple names for classes if useSimpleNames is true.
+     *
+     * @param useSimpleNames
+     *            if true, use just the simple name of each class.
+     * @return the string representation.
+     */
+    String toString(final boolean useSimpleNames) {
+        final StringBuilder buf = new StringBuilder();
+        toString(useSimpleNames, buf);
+        return buf.toString();
+    }
+
+    /**
+     * Render to string, using only <a href=
+     * "https://docs.oracle.com/en/java/javase/15/docs/api/java.base/java/lang/Class.html#getSimpleName()">simple
+     * names</a> for classes.
+     *
+     * @return the string representation, using simple names for classes.
+     */
+    public String toStringWithSimpleNames() {
+        final StringBuilder buf = new StringBuilder();
+        toString(/* useSimpleNames = */ true, buf);
+        return buf.toString();
+    }
+
+    /**
+     * Render to string.
+     *
+     * @return the string representation.
+     */
+    @Override
+    public String toString() {
+        final StringBuilder buf = new StringBuilder();
+        toString(/* useSimpleNames = */ false, buf);
+        return buf.toString();
     }
 }

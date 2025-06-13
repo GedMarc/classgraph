@@ -28,6 +28,8 @@
  */
 package nonapi.io.github.classgraph.utils;
 
+import java.io.ByteArrayOutputStream;
+import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 
 import nonapi.io.github.classgraph.utils.VersionFinder.OperatingSystem;
@@ -54,6 +56,8 @@ public final class URLPathEncoder {
         safe['!'] = safe['*'] = safe['\''] = safe['('] = safe[')'] = safe[','] = true;
         // Only include "/" from "fsegment" and "hsegment" rules (exclude ':', '@', '&' and '=' for safety)
         safe['/'] = true;
+        // Also allow  '+' characters (#468)
+        //safe['+'] = true;
     }
 
     /** Hexadecimal digits. */
@@ -68,6 +72,67 @@ public final class URLPathEncoder {
      */
     private URLPathEncoder() {
         // Cannot be constructed
+    }
+
+    /** Unescape chars in a URL. URLDecoder.decode is broken: https://bugs.openjdk.java.net/browse/JDK-8179507 */
+    private static void unescapeChars(final String str, final boolean isQuery, final ByteArrayOutputStream buf) {
+        if (str.isEmpty()) {
+            return;
+        }
+        for (int chrIdx = 0, len = str.length(); chrIdx < len; chrIdx++) {
+            final char c = str.charAt(chrIdx);
+            if (c == '%') {
+                // Decode %-escaped char sequence, e.g. %5D
+                if (chrIdx > len - 3) {
+                    // Ignore truncated %-seq at end of string
+                } else {
+                    final char c1 = str.charAt(++chrIdx);
+                    final int digit1 = c1 >= '0' && c1 <= '9' ? (c1 - '0')
+                            : c1 >= 'a' && c1 <= 'f' ? (c1 - 'a' + 10)
+                                    : c1 >= 'A' && c1 <= 'F' ? (c1 - 'A' + 10) : -1;
+                    final char c2 = str.charAt(++chrIdx);
+                    final int digit2 = c2 >= '0' && c2 <= '9' ? (c2 - '0')
+                            : c2 >= 'a' && c2 <= 'f' ? (c2 - 'a' + 10)
+                                    : c2 >= 'A' && c2 <= 'F' ? (c2 - 'A' + 10) : -1;
+                    if (digit1 < 0 || digit2 < 0) {
+                        try {
+                            buf.write(str.substring(chrIdx - 2, chrIdx + 1).getBytes(StandardCharsets.UTF_8));
+                        } catch (final IOException e) {
+                            // Ignore
+                        }
+                    } else {
+                        buf.write((byte) ((digit1 << 4) | digit2));
+                    }
+                }
+            } else if (isQuery && c == '+') {
+                buf.write((byte) ' ');
+            } else if (c <= 0x7f) {
+                buf.write((byte) c);
+            } else {
+                try {
+                    buf.write(Character.toString(c).getBytes(StandardCharsets.UTF_8));
+                } catch (final IOException e) {
+                    // Ignore
+                }
+            }
+        }
+    }
+
+    /**
+     * Unescape a URL segment, and turn it from UTF-8 bytes into a Java string.
+     *
+     * @param str
+     *            the str
+     * @return the string
+     */
+    public static String decodePath(final String str) {
+        final int queryIdx = str.indexOf('?');
+        final String partBeforeQuery = queryIdx < 0 ? str : str.substring(0, queryIdx);
+        final String partFromQuery = queryIdx < 0 ? "" : str.substring(queryIdx);
+        final ByteArrayOutputStream buf = new ByteArrayOutputStream();
+        unescapeChars(partBeforeQuery, /* isQuery = */ false, buf);
+        unescapeChars(partFromQuery, /* isQuery = */ true, buf);
+        return new String(buf.toByteArray(), StandardCharsets.UTF_8);
     }
 
     /**
@@ -89,8 +154,8 @@ public final class URLPathEncoder {
         // Also accept ':' after a Windows drive letter
         if (VersionFinder.OS == OperatingSystem.Windows) {
             int i = validColonPrefixLen;
-            if (i < path.length() && path.charAt(i) == '/') {
-                i++;
+            if (i < path.length() && path.startsWith("///", i)) {
+                i += "///".length();
             }
             if (i < path.length() - 1 && Character.isLetter(path.charAt(i)) && path.charAt(i + 1) == ':') {
                 validColonPrefixLen = i + 2;
@@ -154,15 +219,19 @@ public final class URLPathEncoder {
             // Any URL containing "!" segments must have "/" after "!" for the "jar:" URL scheme to work
             urlPathNormalized = urlPathNormalized.replace("/!", "!").replace("!/", "!").replace("!", "!/");
 
-            // Prepend "file:/"
+            // Prepend "file:///" to absolute paths and "file:" to relative paths
             if (windowsDrivePrefix.isEmpty()) {
                 // There is no Windows drive
-                urlPathNormalized = urlPathNormalized.startsWith("/") ? "file:" + urlPathNormalized
-                        : "file:/" + urlPathNormalized;
+                if (urlPathNormalized.startsWith("/")) {
+                    // Absolute path: file:///xyz
+                    urlPathNormalized = "file://" + urlPathNormalized;
+                } else {
+                    // Relative path: file:xyz
+                    urlPathNormalized = "file:" + urlPathNormalized;
+                }
             } else {
-                // There is a Windows drive
-                urlPathNormalized = "file:/" + windowsDrivePrefix
-                        + (urlPathNormalized.startsWith("/") ? urlPathNormalized : "/" + urlPathNormalized);
+                // There is a Windows drive, path must be absolute
+                urlPathNormalized = "file:///" + windowsDrivePrefix + urlPathNormalized;
             }
 
             // Prepend "jar:" if path contains a "!" segment

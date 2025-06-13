@@ -29,11 +29,14 @@
 package io.github.classgraph;
 
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
+import io.github.classgraph.Classfile.TypePathNode;
 import nonapi.io.github.classgraph.types.ParseException;
 import nonapi.io.github.classgraph.types.Parser;
+import nonapi.io.github.classgraph.utils.LogNode;
 
 /**
  * A type signature for a reference type or base type. Subclasses are {@link ReferenceTypeSignature} (whose own
@@ -69,7 +72,7 @@ public abstract class TypeSignature extends HierarchicalTypeSignature {
      */
     @Override
     final protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
         final Set<String> refdClassNames = new HashSet<>();
         findReferencedClassNames(refdClassNames);
         for (final String refdClassName : refdClassNames) {
@@ -80,6 +83,15 @@ public abstract class TypeSignature extends HierarchicalTypeSignature {
     }
 
     /**
+     * Get a list of {@link AnnotationInfo} objects for any type annotations on this type, or null if none.
+     * 
+     * @return a list of {@link AnnotationInfo} objects for any type annotations on this type, or null if none.
+     */
+    public AnnotationInfoList getTypeAnnotationInfo() {
+        return typeAnnotationInfo;
+    }
+
+    /**
      * Compare base types, ignoring generic type parameters.
      * 
      * @param other
@@ -87,36 +99,6 @@ public abstract class TypeSignature extends HierarchicalTypeSignature {
      * @return True if the two {@link TypeSignature} objects are equal, ignoring type parameters.
      */
     public abstract boolean equalsIgnoringTypeParams(final TypeSignature other);
-
-    /**
-     * {@link #toString()} method, possibly returning simple names for classes (i.e. if useSimpleNames is true, the
-     * package names of classes are stripped).
-     *
-     * @param useSimpleNames
-     *            whether or not to use simple names for classes.
-     * @return the string representation of the type signature, with package names stripped.
-     */
-    protected abstract String toStringInternal(boolean useSimpleNames);
-
-    /**
-     * {@link #toString()} method, but returning simple names for classes (i.e. the package names of classes are
-     * stripped).
-     *
-     * @return the string representation of the type signature, with package names stripped.
-     */
-    public String toStringWithSimpleNames() {
-        return toStringInternal(true);
-    }
-
-    /**
-     * {@link #toString()} method for type signature.
-     *
-     * @return the string representation of the type signature.
-     */
-    @Override
-    public String toString() {
-        return toStringInternal(false);
-    }
 
     /**
      * Parse a type signature.
@@ -165,4 +147,15 @@ public abstract class TypeSignature extends HierarchicalTypeSignature {
         }
         return typeSignature;
     }
+
+    /**
+     * Add a type annotation to this type.
+     * 
+     * @param typePath
+     *            The type path.
+     * @param annotationInfo
+     *            The annotation to add.
+     */
+    @Override
+    protected abstract void addTypeAnnotation(List<TypePathNode> typePath, AnnotationInfo annotationInfo);
 }

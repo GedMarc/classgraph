@@ -61,7 +61,7 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.LinkedTransferQueue;
 import java.util.concurrent.TransferQueue;
 
-import io.github.classgraph.ClassGraphException;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 
 /**
  * A cache of field types and associated constructors for each encountered class, used to speed up constructor
@@ -90,13 +90,15 @@ class ClassFieldCache {
     /** Placeholder constructor to signify no constructor was found previously. */
     private static final Constructor<?> NO_CONSTRUCTOR;
 
+    ReflectionUtils reflectionUtils;
+
     static {
         try {
             NO_CONSTRUCTOR = NoConstructor.class.getDeclaredConstructor();
         } catch (NoSuchMethodException | SecurityException e) {
             // Should not happen
-            throw ClassGraphException.newClassGraphException(
-                    "Could not find or access constructor for " + NoConstructor.class.getName(), e);
+            throw new RuntimeException("Could not find or access constructor for " + NoConstructor.class.getName(),
+                    e);
         }
     }
 
@@ -118,9 +120,11 @@ class ClassFieldCache {
      * @param onlySerializePublicFields
      *            Set this to true if you only want to serialize public fields (ignored for deserialization).
      */
-    ClassFieldCache(final boolean forDeserialization, final boolean onlySerializePublicFields) {
+    ClassFieldCache(final boolean forDeserialization, final boolean onlySerializePublicFields,
+            final ReflectionUtils reflectionUtils) {
         this.resolveTypes = forDeserialization;
         this.onlySerializePublicFields = !forDeserialization && onlySerializePublicFields;
+        this.reflectionUtils = reflectionUtils;
     }
 
     /**
@@ -134,8 +138,8 @@ class ClassFieldCache {
     ClassFields get(final Class<?> cls) {
         ClassFields classFields = classToClassFields.get(cls);
         if (classFields == null) {
-            classToClassFields.put(cls,
-                    classFields = new ClassFields(cls, resolveTypes, onlySerializePublicFields, this));
+            classToClassFields.put(cls, classFields = new ClassFields(cls, resolveTypes, onlySerializePublicFields,
+                    this, reflectionUtils));
         }
         return classFields;
     }
@@ -206,7 +210,7 @@ class ClassFieldCache {
                 && (c != Object.class || cls == Object.class); c = c.getSuperclass()) {
             try {
                 final Constructor<?> defaultConstructor = c.getDeclaredConstructor();
-                JSONUtils.isAccessibleOrMakeAccessible(defaultConstructor);
+                JSONUtils.makeAccessible(defaultConstructor, reflectionUtils);
                 // Store found constructor in cache
                 defaultConstructorForConcreteType.put(cls, defaultConstructor);
                 return defaultConstructor;
@@ -241,7 +245,7 @@ class ClassFieldCache {
                     && (c != Object.class || cls == Object.class); c = c.getSuperclass()) {
                 try {
                     final Constructor<?> constructorWithSizeHint = c.getDeclaredConstructor(Integer.TYPE);
-                    JSONUtils.isAccessibleOrMakeAccessible(constructorWithSizeHint);
+                    JSONUtils.makeAccessible(constructorWithSizeHint, reflectionUtils);
                     // Store found constructor in cache
                     constructorForConcreteTypeWithSizeHint.put(cls, constructorWithSizeHint);
                     return constructorWithSizeHint;

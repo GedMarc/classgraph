@@ -319,7 +319,7 @@ final class GraphvizDotfileGenerator {
                         if (buf.charAt(buf.length() - 1) != ' ') {
                             buf.append(' ');
                         }
-                        buf.append(fi.getModifierStr());
+                        buf.append(fi.getModifiersStr());
                     }
 
                     // Field type
@@ -573,7 +573,7 @@ final class GraphvizDotfileGenerator {
 
             if (showFieldTypeDependencyEdges && classNode.fieldInfo != null) {
                 for (final FieldInfo fi : classNode.fieldInfo) {
-                    for (final ClassInfo referencedFieldType : fi.findReferencedClassInfo()) {
+                    for (final ClassInfo referencedFieldType : fi.findReferencedClassInfo(/* log = */ null)) {
                         if (allVisibleNodes.contains(referencedFieldType.getName())) {
                             // class --[ ] field type (open box)
                             buf.append("  \"").append(referencedFieldType.getName()).append("\" -> \"")
@@ -586,7 +586,7 @@ final class GraphvizDotfileGenerator {
 
             if (showMethodTypeDependencyEdges && classNode.methodInfo != null) {
                 for (final MethodInfo mi : classNode.methodInfo) {
-                    for (final ClassInfo referencedMethodType : mi.findReferencedClassInfo()) {
+                    for (final ClassInfo referencedMethodType : mi.findReferencedClassInfo(/* log = */ null)) {
                         if (allVisibleNodes.contains(referencedMethodType.getName())) {
                             // class --[#] field type (open box)
                             buf.append("  \"").append(referencedMethodType.getName()).append("\" -> \"")

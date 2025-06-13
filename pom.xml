@@ -3,7 +3,7 @@
 
     <groupId>io.github.classgraph</groupId>
     <artifactId>classgraph</artifactId>
-    <version>4.8.87-SNAPSHOT</version>
+    <version>4.8.180-SNAPSHOT</version>
     <name>ClassGraph</name>
 
     <description>The uber-fast, ultra-lightweight classpath and module scanner for JVM languages.</description>
@@ -31,8 +31,8 @@
         <connection>scm:git:git@github.com:classgraph/classgraph.git</connection>
         <developerConnection>scm:git:git@github.com:classgraph/classgraph.git</developerConnection>
         <url>https://github.com/classgraph/classgraph</url>
-      <tag>HEAD</tag>
-  </scm>
+        <tag>classgraph-4.8.179</tag>
+    </scm>
 
     <issueManagement>
         <url>https://github.com/classgraph/classgraph/issues</url>
@@ -63,55 +63,69 @@
         <!-- <maven.compiler.showDeprecation>true</maven.compiler.showDeprecation> -->
     </properties>
 
-    <!-- Test dependencies (main has no dependencies). -->
     <!-- Find dependency updates with: ./mvnw versions:display-dependency-updates -->
     <dependencies>
+        <!-- Optional runtime dependency: -->
+        <dependency>
+            <groupId>io.github.toolfactory</groupId>
+            <artifactId>narcissus</artifactId>
+            <version>1.0.7</version>
+            <optional>true</optional>
+        </dependency>
+        <dependency>
+            <groupId>io.github.toolfactory</groupId>
+            <artifactId>jvm-driver</artifactId>
+            <version>9.7.1</version>
+            <optional>true</optional>
+        </dependency>
+
+        <!-- Test dependencies: -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
-            <version>5.6.0</version>
+            <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.openjdk.jmh</groupId>
             <artifactId>jmh-core</artifactId>
-            <version>1.23</version>
+            <version>1.37</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.openjdk.jmh</groupId>
             <artifactId>jmh-generator-annprocess</artifactId>
-            <version>1.23</version>
+            <version>1.37</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.assertj</groupId>
             <artifactId>assertj-core</artifactId>
-            <version>3.16.1</version>
+            <version>3.25.3</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>javax.enterprise</groupId>
             <artifactId>cdi-api</artifactId>
-            <version>2.0.SP1</version>
+            <version>2.0</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.ops4j.pax.url</groupId>
             <artifactId>pax-url-aether</artifactId>
-            <version>2.6.1</version>
+            <version>2.6.14</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-api</artifactId>
-            <version>2.0.0-alpha1</version>
+            <version>2.0.13</version>
             <scope>test</scope>
         </dependency>
         <dependency>
             <groupId>org.slf4j</groupId>
             <artifactId>slf4j-jdk14</artifactId>
-            <version>2.0.0-alpha1</version>
+            <version>2.0.13</version>
             <scope>test</scope>
         </dependency>
         <dependency>
@@ -123,7 +137,13 @@
         <dependency>
             <groupId>com.google.jimfs</groupId>
             <artifactId>jimfs</artifactId>
-            <version>1.1</version>
+            <version>1.3.0</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>jakarta.validation</groupId>
+            <artifactId>jakarta.validation-api</artifactId>
+            <version>3.0.2</version>
             <scope>test</scope>
         </dependency>
 
@@ -136,7 +156,7 @@
             <!-- See: https://bugs.eclipse.org/bugs/show_bug.cgi?id=552198 -->
             <groupId>org.eclipse.jdt</groupId>
             <artifactId>org.eclipse.jdt.annotation</artifactId>
-            <version>2.2.400</version>
+            <version>2.3.0</version>
             <scope>provided</scope>
         </dependency>
     </dependencies>
@@ -145,88 +165,89 @@
         <plugins>
             <!-- Plugins are listed here, but configured in pluginManagement, for compatibility with Eclipse. -->
             <!-- See: https://stackoverflow.com/a/10483284/3950982 -->
-            <!-- Find updates with: ./mvnw versions:display-plugin-updates -->
+            <!-- Find plugin updates with: ./mvnw versions:display-plugin-updates -->
+            <!-- List order of plugin execution with: ./mvnw -Prelease fr.jcgay.maven.plugins:buildplan-maven-plugin:list-phase -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-enforcer-plugin</artifactId>
-                <version>3.0.0-M3</version>
+                <version>3.4.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-resources-plugin</artifactId>
-                <version>3.1.0</version>
+                <version>3.3.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.8.1</version>
+                <version>3.13.0</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.0.0-M4</version>
+                <version>3.2.5</version>
             </plugin>
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>build-helper-maven-plugin</artifactId>
-                <version>3.0.0</version>
+                <version>3.5.0</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-jar-plugin</artifactId>
-                <version>3.2.0</version>
+                <version>3.4.0</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-antrun-plugin</artifactId>
-                <version>1.8</version><!--$NO-MVN-MAN-VER$ -->
+                <version>3.1.0</version>                <!--$NO-MVN-MAN-VER$ -->
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-source-plugin</artifactId>
-                <version>3.2.1</version>
+                <version>3.3.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-javadoc-plugin</artifactId>
-                <version>3.1.1</version>
+                <version>3.6.3</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-gpg-plugin</artifactId>
-                <version>1.6</version>
+                <version>3.2.3</version>
             </plugin>
             <plugin>
                 <groupId>org.sonatype.plugins</groupId>
                 <artifactId>nexus-staging-maven-plugin</artifactId>
-                <version>1.6.8</version>
+                <version>1.6.13</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-release-plugin</artifactId>
-                <version>3.0.0-M1</version>
+                <version>3.0.1</version>
             </plugin>
 
             <!-- Override versions of the following plugins, inherited from the super-pom, with latest versions -->
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-clean-plugin</artifactId>
-                <version>3.1.0</version>
+                <version>3.3.2</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-deploy-plugin</artifactId>
-                <version>3.0.0-M1</version>
+                <version>3.1.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-install-plugin</artifactId>
-                <version>3.0.0-M1</version>
+                <version>3.1.1</version>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-site-plugin</artifactId>
-                <version>3.8.2</version>
+                <version>3.12.1</version>
             </plugin>
         </plugins>
 
@@ -240,7 +261,7 @@
                         <dependency>
                             <groupId>org.codehaus.mojo</groupId>
                             <artifactId>animal-sniffer-enforcer-rule</artifactId>
-                            <version>1.18</version>
+                            <version>1.23</version>
                         </dependency>
                     </dependencies>
                     <executions>
@@ -257,18 +278,7 @@
                                         <version>[3.6.3,)</version>
                                     </requireMavenVersion>
                                 </rules>
-                                <!-- This is disabled currently because of a bug in maven-enforcer-plugin-3.0.0-M3: -->
-                                <!-- https://issues.apache.org/jira/browse/MENFORCER-351 -->
-                                <skip>true</skip>
                             </configuration>
-                        </execution>
-                        <!-- Display environment info -->
-                        <execution>
-                            <id>display-info</id>
-                            <phase>compile</phase>
-                            <goals>
-                                <goal>display-info</goal>
-                            </goals>
                         </execution>
                         <!-- Check main project for compatibility with JDK 7 API -->
                         <execution>
@@ -282,7 +292,6 @@
                                     <checkSignatureRule implementation="org.codehaus.mojo.animal_sniffer.enforcer.CheckSignatureRule">
                                         <signature>
                                             <groupId>org.codehaus.mojo.signature</groupId>
-                                            <!-- Check against JDK 7 API -->
                                             <artifactId>java17</artifactId>
                                             <version>1.0</version>
                                         </signature>
@@ -365,6 +374,24 @@
                                 </target>
                             </configuration>
                         </execution>
+                        <execution>
+                            <!-- Make duplicate copy of Javadoc into a subdirectory with the name of the module, -->
+                            <!-- since Eclipse (and possibly other tools) detects the presence of the module -->
+                            <!-- descriptor, and expects the Javadoc files to use modular paths (#583). -->
+                            <!-- Needs to happen before maven-gpg-plugin runs, otherwise signature will be invalid. -->
+                            <id>add-modular-javadoc</id>
+                            <phase>verify</phase>
+                            <goals>
+                                <goal>run</goal>
+                            </goals>
+                            <configuration>
+                                <target>
+                                    <jar update="true" destfile="${project.build.directory}/${project.build.finalName}-javadoc.jar">
+                                        <zipfileset prefix="io.github.classgraph" dir="${project.build.directory}/apidocs" includes="**/*" />
+                                    </jar>
+                                </target>
+                            </configuration>
+                        </execution>
                     </executions>
                 </plugin>
 
@@ -385,8 +412,18 @@
                         <!-- will lead to the following build-time warning, if maven.compiler.showWarnings -->
                         <!-- is set to true: -->
                         <!-- "[WARNING] bootstrap class path not set in conjunction with -source 7" -->
+                        <!-- TODO: JDK 7 is no longer supported as of JDK 20. -->
                         <source>7</source>
                         <target>7</target>
+                        <!-- Tests use recent JDK features -->
+                        <testSource>8</testSource>
+                        <testTarget>8</testTarget>
+                        <useIncrementalCompilation>false</useIncrementalCompilation>
+                        <compilerArgs>
+                            <arg>-Xlint:all</arg>                            <!-- Max lint -->
+                            <arg>-Xlint:-options</arg>                            <!-- Remove warnings about JDK7 being deprecated sometime -->
+                            <arg>-Werror</arg>                            <!-- Stop on warnings -->
+                        </compilerArgs>
                     </configuration>
                     <executions>
                         <execution>
@@ -397,9 +434,12 @@
                             </goals>
                             <configuration>
                                 <encoding>UTF-8</encoding>
-                                <!-- Tests use some JDK 8 features, such as lambdas -->
+                                <!-- Tests use recent JDK features -->
                                 <source>8</source>
                                 <target>8</target>
+                                <compilerArgs>
+                                    <arg>-parameters</arg>
+                                </compilerArgs>
                             </configuration>
                         </execution>
                     </executions>
@@ -457,7 +497,9 @@
                                 <Export-Package>io.github.classgraph;version="${project.version}"</Export-Package>
                                 <!-- Make sure "requires" entries in the module descriptor match these imports: -->
                                 <!-- src/main/module-info/io.github.classgraph/module-info.java -->
-                                <Import-Package>javax.xml.xpath,javax.xml.namespace,javax.xml.parsers,org.w3c.dom,jdk.internal.misc;resolution:="optional",sun.misc;resolution:="optional",sun.nio.ch;resolution:="optional"</Import-Package>
+                                <Import-Package>javax.xml.xpath,javax.xml.namespace,javax.xml.parsers,org.w3c.dom,sun.misc;resolution:="optional",sun.nio.ch;resolution:="optional",io.github.toolfactory.narcissus;resolution:="optional",io.github.toolfactory.jvm;resolution:="optional"</Import-Package>
+                                <!-- Add the same module dependencies that are specified in module-info.java -->
+                                <Dependencies>java.xml,jdk.unsupported,java.management,java.logging</Dependencies>
                                 <!-- This is a multi-release jar, since module-info.class will be added to -->
                                 <!-- META-INF/versions/9 , so we need to set the Multi-Release entry to true -->
                                 <Multi-Release>true</Multi-Release>
@@ -523,8 +565,6 @@
                     <groupId>org.apache.maven.plugins</groupId>
                     <artifactId>maven-release-plugin</artifactId>
                     <configuration>
-                        <phase>deploy</phase>
-                        <goals>deploy</goals>
                         <autoVersionSubmodules>true</autoVersionSubmodules>
                         <!-- Activate release profile -->
                         <releaseProfiles>release</releaseProfiles>

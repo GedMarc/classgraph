@@ -34,10 +34,13 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 
+import nonapi.io.github.classgraph.utils.LogNode;
+
 /** A union type, used for typesafe serialization/deserialization to/from JSON. Only one field is ever set. */
 class ObjectTypedValueWrapper extends ScanResultObject {
     // Parameter value is split into different fields by type, so that serialization and deserialization
     // works properly (can't properly serialize a field of Object type, since the concrete type is not
+    // TODO: remove this class once JSON serialization is removed
     /** Enum value. */
     // stored in JSON).
     private AnnotationEnumValue annotationEnumValue;
@@ -313,8 +316,7 @@ class ObjectTypedValueWrapper extends ScanResultObject {
             if (elementTypeSig instanceof ClassRefTypeSignature) {
                 // Look up the name of the element type, for non-primitive arrays 
                 final ClassRefTypeSignature classRefTypeSignature = (ClassRefTypeSignature) elementTypeSig;
-                return getClass ? classRefTypeSignature.loadClass()
-                        : classRefTypeSignature.getFullyQualifiedClassName();
+                return getClass ? classRefTypeSignature.loadClass() : classRefTypeSignature.getClassName();
             } else if (elementTypeSig instanceof BaseTypeSignature) {
                 // Look up the name of the primitive class, for primitive arrays
                 final BaseTypeSignature baseTypeSignature = (BaseTypeSignature) elementTypeSig;
@@ -556,19 +558,19 @@ class ObjectTypedValueWrapper extends ScanResultObject {
      */
     @Override
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
         if (annotationEnumValue != null) {
-            annotationEnumValue.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            annotationEnumValue.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         } else if (annotationClassRef != null) {
             final ClassInfo classInfo = annotationClassRef.getClassInfo();
             if (classInfo != null) {
                 refdClassInfo.add(classInfo);
             }
         } else if (annotationInfo != null) {
-            annotationInfo.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            annotationInfo.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         } else if (objectArrayValue != null) {
             for (final ObjectTypedValueWrapper item : objectArrayValue) {
-                item.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+                item.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
             }
         }
     }
@@ -613,5 +615,57 @@ class ObjectTypedValueWrapper extends ScanResultObject {
                 && Arrays.equals(floatArrayValue, o.floatArrayValue)
                 && Arrays.equals(byteArrayValue, o.byteArrayValue)
                 && Arrays.deepEquals(objectArrayValue, o.objectArrayValue);
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    @Override
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
+        if (annotationEnumValue != null) {
+            annotationEnumValue.toString(useSimpleNames, buf);
+        } else if (annotationClassRef != null) {
+            annotationClassRef.toString(useSimpleNames, buf);
+        } else if (annotationInfo != null) {
+            annotationInfo.toString(useSimpleNames, buf);
+        } else if (stringValue != null) {
+            buf.append(stringValue);
+        } else if (integerValue != null) {
+            buf.append(integerValue);
+        } else if (longValue != null) {
+            buf.append(longValue);
+        } else if (shortValue != null) {
+            buf.append(shortValue);
+        } else if (booleanValue != null) {
+            buf.append(booleanValue);
+        } else if (characterValue != null) {
+            buf.append(characterValue);
+        } else if (floatValue != null) {
+            buf.append(floatValue);
+        } else if (doubleValue != null) {
+            buf.append(doubleValue);
+        } else if (byteValue != null) {
+            buf.append(byteValue);
+        } else if (stringArrayValue != null) {
+            buf.append(Arrays.toString(stringArrayValue));
+        } else if (intArrayValue != null) {
+            buf.append(Arrays.toString(intArrayValue));
+        } else if (longArrayValue != null) {
+            buf.append(Arrays.toString(longArrayValue));
+        } else if (shortArrayValue != null) {
+            buf.append(Arrays.toString(shortArrayValue));
+        } else if (booleanArrayValue != null) {
+            buf.append(Arrays.toString(booleanArrayValue));
+        } else if (charArrayValue != null) {
+            buf.append(Arrays.toString(charArrayValue));
+        } else if (floatArrayValue != null) {
+            buf.append(Arrays.toString(floatArrayValue));
+        } else if (doubleArrayValue != null) {
+            buf.append(Arrays.toString(doubleArrayValue));
+        } else if (byteArrayValue != null) {
+            buf.append(Arrays.toString(byteArrayValue));
+        } else if (objectArrayValue != null) {
+            // TODO this doesn't handle nested arrays, but this toString() method is only used for debugging
+            buf.append(Arrays.toString(objectArrayValue));
+        }
     }
 }

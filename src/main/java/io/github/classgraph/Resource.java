@@ -101,8 +101,15 @@ public abstract class Resource implements Closeable, Comparable<Resource> {
     private static URL uriToURL(final URI uri) {
         try {
             return uri.toURL();
-        } catch (final MalformedURLException e) {
-            throw new IllegalArgumentException("Could not create URL from URI: " + uri + " -- " + e);
+        } catch (final IllegalArgumentException | MalformedURLException e) {
+            if (uri.getScheme().equals("jrt")) {
+                // Currently URL cannot handle the "jrt:" scheme, used by system modules.
+                throw new IllegalArgumentException("Could not create URL from URI with \"jrt:\" scheme "
+                        + "(\"jrt:\" is not supported by the URL class without a custom URL protocol handler): "
+                        + uri);
+            } else {
+                throw new IllegalArgumentException("Could not create URL from URI: " + uri + " -- " + e);
+            }
         }
     }
 
@@ -205,11 +212,9 @@ public abstract class Resource implements Closeable, Comparable<Resource> {
      *             If an I/O exception occurred.
      */
     public String getContentAsString() throws IOException {
-        try {
-            return new String(load(), StandardCharsets.UTF_8);
-        } finally {
-            close();
-        }
+        final String content = new String(load(), StandardCharsets.UTF_8);
+        close();
+        return content;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -232,7 +237,10 @@ public abstract class Resource implements Closeable, Comparable<Resource> {
      *         full path of {@code "BOOT-INF/classes/com/xyz/resource.xml"} or
      *         {@code "META-INF/versions/11/com/xyz/resource.xml"}, not {@code "com/xyz/resource.xml"}.
      */
-    public abstract String getPathRelativeToClasspathElement();
+    public String getPathRelativeToClasspathElement() {
+        // Only overridden for jars
+        return getPath();
+    }
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -248,13 +256,36 @@ public abstract class Resource implements Closeable, Comparable<Resource> {
 
     /**
      * Open a {@link ByteBuffer} for a classpath resource. Make sure you call {@link Resource#close()} when you are
-     * finished with the {@link ByteBuffer}, so that the {@link ByteBuffer} is released or unmapped.
+     * finished with the {@link ByteBuffer}, so that the {@link ByteBuffer} is released or unmapped. See also
+     * {@link #readCloseable()}.
      *
      * @return The allocated or mapped {@link ByteBuffer} for the resource file content.
      * @throws IOException
-     *             If the resource could not be opened.
+     *             If the resource could not be read.
      */
     public abstract ByteBuffer read() throws IOException;
+
+    /**
+     * Open a {@link ByteBuffer} for a classpath resource, and wrap it in a {@link CloseableByteBuffer} instance,
+     * which implements the {@link Closeable#close()} method to free the underlying {@link ByteBuffer} when
+     * {@link CloseableByteBuffer#close()} is called, by automatically calling {@link Resource#close()}.
+     * 
+     * <p>
+     * Call {@link CloseableByteBuffer#getByteBuffer()} on the returned instance to access the underlying
+     * {@link ByteBuffer}.
+     *
+     * @return The allocated or mapped {@link ByteBuffer} for the resource file content.
+     * @throws IOException
+     *             If the resource could not be read.
+     */
+    public CloseableByteBuffer readCloseable() throws IOException {
+        return new CloseableByteBuffer(read(), new Runnable() {
+            @Override
+            public void run() {
+                close();
+            }
+        });
+    }
 
     /**
      * Load a classpath resource and return its content as a byte array. Automatically calls

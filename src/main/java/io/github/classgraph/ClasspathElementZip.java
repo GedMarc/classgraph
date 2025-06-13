@@ -29,6 +29,7 @@
 package io.github.classgraph;
 
 import java.io.File;
+import java.io.IOError;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.URI;
@@ -37,7 +38,10 @@ import java.net.URL;
 import java.nio.ByteBuffer;
 import java.nio.file.Path;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -45,7 +49,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.classgraph.Scanner.ClasspathEntryWorkUnit;
 import nonapi.io.github.classgraph.classloaderhandler.ClassLoaderHandlerRegistry;
-import nonapi.io.github.classgraph.classpath.ClasspathOrder.ClasspathElementAndClassLoader;
+import nonapi.io.github.classgraph.concurrency.SingletonMap.NewInstanceException;
 import nonapi.io.github.classgraph.concurrency.SingletonMap.NullSingletonException;
 import nonapi.io.github.classgraph.concurrency.WorkQueue;
 import nonapi.io.github.classgraph.fastzipfilereader.FastZipEntry;
@@ -64,16 +68,19 @@ import nonapi.io.github.classgraph.utils.VersionFinder;
 
 /** A zip/jarfile classpath element. */
 class ClasspathElementZip extends ClasspathElement {
-    /** The {@link String} representation of the raw path, {@link URL} or {@link URI} for this zipfile. */
+    /**
+     * The {@link String} representation of the path string, {@link URL}, {@link URI}, or {@link Path} for this
+     * zipfile.
+     */
     private final String rawPath;
     /** The logical zipfile for this classpath element. */
     LogicalZipFile logicalZipFile;
-    /** The package root within the jarfile. */
-    private String packageRootPrefix = "";
     /** The normalized path of the jarfile, "!/"-separated if nested, excluding any package root. */
     private String zipFilePath;
     /** A map from relative path to {@link Resource} for non-rejected zip entries. */
     private final ConcurrentHashMap<String, Resource> relativePathToResource = new ConcurrentHashMap<>();
+    /** A list of all automatic package root prefixes found as prefixes of paths within this zipfile. */
+    private final Set<String> strippedAutomaticPackageRootPrefixes = new HashSet<>();
     /** The nested jar handler. */
     private final NestedJarHandler nestedJarHandler;
     /**
@@ -87,22 +94,33 @@ class ClasspathElementZip extends ClasspathElement {
     /**
      * A jarfile classpath element.
      *
-     * @param rawPathObj
-     *            the raw path to the jarfile as a {@link String}, possibly including "!"-delimited nested paths, or
-     *            a {@link URL} or {@link URI} for the jarfile
-     * @param classLoader
-     *            the classloader
+     * @param workUnit
+     *            the work unit
      * @param nestedJarHandler
      *            the nested jar handler
      * @param scanSpec
      *            the scan spec
      */
-    ClasspathElementZip(final Object rawPathObj, final ClassLoader classLoader,
-            final NestedJarHandler nestedJarHandler, final ScanSpec scanSpec) {
-        super(classLoader, scanSpec);
-        // Convert the raw path object (String, URL, or URI) to a string.
+    ClasspathElementZip(final ClasspathEntryWorkUnit workUnit, final NestedJarHandler nestedJarHandler,
+            final ScanSpec scanSpec) {
+        super(workUnit, scanSpec);
+        final Object rawPathObj = workUnit.classpathEntryObj;
+
+        // Convert the raw path object (Path, URL, or URI) to a string.
         // Any required URL/URI parsing are done in NestedJarHandler.
-        this.rawPath = rawPathObj.toString();
+        String rawPath = null;
+        if (rawPathObj instanceof Path) {
+            // Path.toString does not include URI scheme => turn into a URI so that toString works
+            try {
+                rawPath = ((Path) rawPathObj).toUri().toString();
+            } catch (final IOError | SecurityException e) {
+                // Fall through
+            }
+        }
+        if (rawPath == null) {
+            rawPath = rawPathObj.toString();
+        }
+        this.rawPath = rawPath;
         this.zipFilePath = rawPath; // May change when open() is called
         this.nestedJarHandler = nestedJarHandler;
     }
@@ -123,7 +141,7 @@ class ClasspathElementZip extends ClasspathElement {
         }
         final LogNode subLog = log == null ? null : log(classpathElementIdx, "Opening jar: " + rawPath, log);
         final int plingIdx = rawPath.indexOf('!');
-        final String outermostZipFilePathResolved = FastPathResolver.resolve(FileUtils.CURR_DIR_PATH,
+        final String outermostZipFilePathResolved = FastPathResolver.resolve(FileUtils.currDirPath(),
                 plingIdx < 0 ? rawPath : rawPath.substring(0, plingIdx));
         if (!scanSpec.jarAcceptReject.isAcceptedAndNotRejected(outermostZipFilePathResolved)) {
             if (subLog != null) {
@@ -139,9 +157,11 @@ class ClasspathElementZip extends ClasspathElement {
             try {
                 logicalZipFileAndPackageRoot = nestedJarHandler.nestedPathToLogicalZipFileAndPackageRootMap
                         .get(rawPath, subLog);
-            } catch (final NullSingletonException e) {
-                // Generally thrown on the second and subsequent attempt to call .get(), after the first failed
-                throw new IOException("Could not get logical zipfile " + rawPath + " : " + e);
+            } catch (final NullSingletonException | NewInstanceException e) {
+                // Generally thrown on the second and subsequent attempt to call .get(), after the first failed,
+                // or newInstance() threw an exception
+                throw new IOException("Could not get logical zipfile " + rawPath + " : "
+                        + (e.getCause() == null ? e : e.getCause()));
             }
             logicalZipFile = logicalZipFileAndPackageRoot.getKey();
             if (logicalZipFile == null) {
@@ -150,7 +170,7 @@ class ClasspathElementZip extends ClasspathElement {
             }
 
             // Get the normalized path of the logical zipfile
-            zipFilePath = FastPathResolver.resolve(FileUtils.CURR_DIR_PATH, logicalZipFile.getPath());
+            zipFilePath = FastPathResolver.resolve(FileUtils.currDirPath(), logicalZipFile.getPath());
 
             // Get package root of jarfile
             final String packageRoot = logicalZipFileAndPackageRoot.getValue();
@@ -196,11 +216,10 @@ class ClasspathElementZip extends ClasspathElement {
                         if (subLog != null) {
                             subLog.log("Found nested lib jar: " + entryPath);
                         }
-                        workQueue.addWorkUnit(new ClasspathEntryWorkUnit(
-                                new ClasspathElementAndClassLoader(entryPath, classLoader),
+                        workQueue.addWorkUnit(new ClasspathEntryWorkUnit(entryPath, getClassLoader(),
                                 /* parentClasspathElement = */ this,
                                 /* orderWithinParentClasspathElement = */
-                                childClasspathEntryIdx++));
+                                childClasspathEntryIdx++, /* packageRootPrefix = */ ""));
                         break;
                     }
                 }
@@ -237,12 +256,10 @@ class ClasspathElementZip extends ClasspathElement {
                     if (scheduledChildClasspathElements.add(childClassPathEltPathWithPrefix)) {
                         // Schedule child classpath element for scanning
                         workQueue.addWorkUnit( //
-                                new ClasspathEntryWorkUnit(
-                                        new ClasspathElementAndClassLoader(childClassPathEltPathWithPrefix,
-                                                classLoader),
+                                new ClasspathEntryWorkUnit(childClassPathEltPathWithPrefix, getClassLoader(),
                                         /* parentClasspathElement = */ this,
                                         /* orderWithinParentClasspathElement = */
-                                        childClasspathEntryIdx++));
+                                        childClasspathEntryIdx++, /* packageRootPrefix = */ ""));
                     }
                 }
             }
@@ -268,11 +285,10 @@ class ClasspathElementZip extends ClasspathElement {
                     // Only add child classpath elements once
                     if (scheduledChildClasspathElements.add(childClassPathEltPath)) {
                         // Schedule child classpath element for scanning
-                        workQueue.addWorkUnit(new ClasspathEntryWorkUnit(
-                                new ClasspathElementAndClassLoader(childClassPathEltPath, classLoader),
+                        workQueue.addWorkUnit(new ClasspathEntryWorkUnit(childClassPathEltPath, getClassLoader(),
                                 /* parentClasspathElement = */ this,
                                 /* orderWithinParentClasspathElement = */
-                                childClasspathEntryIdx++));
+                                childClasspathEntryIdx++, /* packageRootPrefix = */ ""));
                     }
                 }
             }
@@ -291,7 +307,7 @@ class ClasspathElementZip extends ClasspathElement {
     private Resource newResource(final FastZipEntry zipEntry, final String pathRelativeToPackageRoot) {
         return new Resource(this, zipEntry.uncompressedSize) {
             /** True if the resource is open. */
-            protected AtomicBoolean isOpen = new AtomicBoolean();
+            private final AtomicBoolean isOpen = new AtomicBoolean();
 
             /**
              * Path with package root prefix and/or any Spring Boot prefix ("BOOT-INF/classes/" or
@@ -304,7 +320,11 @@ class ClasspathElementZip extends ClasspathElement {
 
             @Override
             public String getPathRelativeToClasspathElement() {
-                return zipEntry.entryName;
+                if (zipEntry.entryName.startsWith(packageRootPrefix)) {
+                    return zipEntry.entryName.substring(packageRootPrefix.length());
+                } else {
+                    return zipEntry.entryName;
+                }
             }
 
             @Override
@@ -351,18 +371,30 @@ class ClasspathElementZip extends ClasspathElement {
                 return perms;
             }
 
-            @Override
-            public InputStream open() throws IOException {
+            protected void checkCanOpen() {
                 if (skipClasspathElement) {
                     // Shouldn't happen
-                    throw new IOException("Jarfile could not be opened");
+                    throw new IllegalStateException("Classpath element could not be opened");
                 }
                 if (isOpen.getAndSet(true)) {
-                    throw new IOException(
+                    throw new IllegalStateException(
                             "Resource is already open -- cannot open it again without first calling close()");
                 }
+                if (scanResult != null && scanResult.isClosed()) {
+                    throw new IllegalStateException("Cannot open a resource after the ScanResult is closed");
+                }
+            }
+
+            @Override
+            ClassfileReader openClassfile() throws IOException {
+                return new ClassfileReader(open(), this);
+            }
+
+            @Override
+            public InputStream open() throws IOException {
+                checkCanOpen();
                 try {
-                    inputStream = zipEntry.getSlice().open();
+                    inputStream = zipEntry.getSlice().open(this);
                     length = zipEntry.uncompressedSize;
                     return inputStream;
 
@@ -373,20 +405,8 @@ class ClasspathElementZip extends ClasspathElement {
             }
 
             @Override
-            ClassfileReader openClassfile() throws IOException {
-                return new ClassfileReader(open());
-            }
-
-            @Override
             public ByteBuffer read() throws IOException {
-                if (skipClasspathElement) {
-                    // Shouldn't happen
-                    throw new IOException("Jarfile could not be opened");
-                }
-                if (isOpen.getAndSet(true)) {
-                    throw new IOException(
-                            "Resource is already open -- cannot open it again without first calling close()");
-                }
+                checkCanOpen();
                 try {
                     byteBuffer = zipEntry.getSlice().read();
                     length = byteBuffer.remaining();
@@ -399,28 +419,25 @@ class ClasspathElementZip extends ClasspathElement {
 
             @Override
             public byte[] load() throws IOException {
-                if (skipClasspathElement) {
-                    // Shouldn't happen
-                    throw new IOException("Jarfile could not be opened");
-                }
-                if (isOpen.getAndSet(true)) {
-                    throw new IOException(
-                            "Resource is already open -- cannot open it again without first calling close()");
-                }
+                checkCanOpen();
                 try (Resource res = this) { // Close this after use
                     final byte[] byteArray = zipEntry.getSlice().load();
-                    length = byteArray.length;
+                    res.length = byteArray.length;
                     return byteArray;
                 }
             }
 
             @Override
             public void close() {
-                super.close(); // Close inputStream
-                if (isOpen.getAndSet(false) && byteBuffer != null) {
-                    // ByteBuffer should be a duplicate or slice, or should wrap an array, so it doesn't
-                    // need to be unmapped
-                    byteBuffer = null;
+                if (isOpen.getAndSet(false)) {
+                    if (byteBuffer != null) {
+                        // ByteBuffer should be a duplicate or slice, or should wrap an array, so it doesn't
+                        // need to be unmapped
+                        byteBuffer = null;
+                    }
+
+                    // Close inputStream
+                    super.close();
                 }
             }
         };
@@ -448,6 +465,9 @@ class ClasspathElementZip extends ClasspathElement {
     @Override
     void scanPaths(final LogNode log) {
         if (logicalZipFile == null) {
+            skipClasspathElement = true;
+        }
+        if (!checkResourcePathAcceptReject(getZipFilePath(), log)) {
             skipClasspathElement = true;
         }
         if (skipClasspathElement) {
@@ -486,7 +506,8 @@ class ClasspathElementZip extends ClasspathElement {
             // jar, in which case zipEntry.entryNameUnversioned has the version prefix stripped, or this is an
             // unversioned jar (e.g. the multi-version flag is not set in the manifest file) and there are some
             // spurious files in a multi-version path (in which case, they should be ignored).
-            if (relativePath.startsWith(LogicalZipFile.MULTI_RELEASE_PATH_PREFIX)) {
+            if (!scanSpec.enableMultiReleaseVersions
+                    && relativePath.startsWith(LogicalZipFile.MULTI_RELEASE_PATH_PREFIX)) {
                 if (subLog != null) {
                     if (VersionFinder.JAVA_MAJOR_VERSION < 9) {
                         subLog.log("Skipping versioned entry in jar, because JRE version "
@@ -538,23 +559,28 @@ class ClasspathElementZip extends ClasspathElement {
             }
 
             // Strip the package root prefix from the relative path
-            // N.B. these semantics should mirror those in getResource()
             if (!packageRootPrefix.isEmpty()) {
                 relativePath = relativePath.substring(packageRootPrefix.length());
             } else {
                 // Strip any package root prefix from the relative path
                 for (int i = 0; i < ClassLoaderHandlerRegistry.AUTOMATIC_PACKAGE_ROOT_PREFIXES.length; i++) {
-                    if (relativePath.startsWith(ClassLoaderHandlerRegistry.AUTOMATIC_PACKAGE_ROOT_PREFIXES[i])) {
-                        relativePath = relativePath
-                                .substring(ClassLoaderHandlerRegistry.AUTOMATIC_PACKAGE_ROOT_PREFIXES[i].length());
+                    final String packageRoot = ClassLoaderHandlerRegistry.AUTOMATIC_PACKAGE_ROOT_PREFIXES[i];
+                    if (relativePath.startsWith(packageRoot)) {
+                        // Strip package root
+                        relativePath = relativePath.substring(packageRoot.length());
+                        // Strip final slash from package root
+                        final String packageRootWithoutFinalSlash = packageRoot.endsWith("/")
+                                ? packageRoot.substring(0, packageRoot.length() - 1)
+                                : packageRoot;
+                        // Store package root for use by getAllURIs()
+                        strippedAutomaticPackageRootPrefixes.add(packageRootWithoutFinalSlash);
                     }
                 }
             }
 
             // Accept/reject classpath elements based on file resource paths
-            checkResourcePathAcceptReject(relativePath, log);
-            if (skipClasspathElement) {
-                return;
+            if (!checkResourcePathAcceptReject(relativePath, log)) {
+                continue;
             }
 
             // Get match status of the parent directory of this ZipEntry file's relative path (or reuse the last
@@ -648,6 +674,30 @@ class ClasspathElementZip extends ClasspathElement {
     }
 
     /**
+     * Return URI for classpath element, plus URIs for any stripped nested automatic package root prefixes, e.g.
+     * "!/BOOT-INF/classes".
+     */
+    @Override
+    List<URI> getAllURIs() {
+        if (strippedAutomaticPackageRootPrefixes.isEmpty()) {
+            return Collections.singletonList(getURI());
+        } else {
+            final URI uri = getURI();
+            final List<URI> uris = new ArrayList<>();
+            uris.add(uri);
+            final String uriStr = uri.toString();
+            for (final String prefix : strippedAutomaticPackageRootPrefixes) {
+                try {
+                    uris.add(new URI(uriStr + "!/" + prefix));
+                } catch (final URISyntaxException e) {
+                    // Ignore
+                }
+            }
+            return uris;
+        }
+    }
+
+    /**
      * Get the {@link File} for the outermost zipfile of this classpath element.
      *
      * @return The {@link File} for the outermost zipfile of this classpath element, or null if this file was
@@ -661,7 +711,7 @@ class ClasspathElementZip extends ClasspathElement {
         } else {
             // Not performing a full scan (only getting classpath elements), so logicalZipFile is not set
             final int plingIdx = rawPath.indexOf('!');
-            final String outermostZipFilePathResolved = FastPathResolver.resolve(FileUtils.CURR_DIR_PATH,
+            final String outermostZipFilePathResolved = FastPathResolver.resolve(FileUtils.currDirPath(),
                     plingIdx < 0 ? rawPath : rawPath.substring(0, plingIdx));
             return new File(outermostZipFilePathResolved);
         }

@@ -32,7 +32,6 @@ import nonapi.io.github.classgraph.classpath.ClassLoaderOrder;
 import nonapi.io.github.classgraph.classpath.ClasspathOrder;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.utils.LogNode;
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
 
 /** Extract classpath entries from the Uno-Jar's JarClassLoader and One-Jar's JarClassLoader. */
 class UnoOneJarClassLoaderHandler implements ClassLoaderHandler {
@@ -87,7 +86,8 @@ class UnoOneJarClassLoaderHandler implements ClassLoaderHandler {
 
         // For Uno-Jar:
 
-        final String unoJarOneJarPath = (String) ReflectionUtils.invokeMethod(classLoader, "getOneJarPath", false);
+        final String unoJarOneJarPath = (String) classpathOrder.reflectionUtils.invokeMethod(false, classLoader,
+                "getOneJarPath");
         classpathOrder.addClasspathEntry(unoJarOneJarPath, classLoader, scanSpec, log);
 
         // If this property is defined, Uno-Jar jar path was specified on commandline. Otherwise, jar path

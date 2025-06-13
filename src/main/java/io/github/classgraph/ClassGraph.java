@@ -30,6 +30,7 @@ package io.github.classgraph;
 
 import java.io.File;
 import java.io.InputStream;
+import java.lang.reflect.AccessibleObject;
 import java.net.URI;
 import java.net.URL;
 import java.nio.ByteBuffer;
@@ -48,6 +49,7 @@ import java.util.regex.Pattern;
 import nonapi.io.github.classgraph.classpath.SystemJarFinder;
 import nonapi.io.github.classgraph.concurrency.AutoCloseableExecutorService;
 import nonapi.io.github.classgraph.concurrency.InterruptionChecker;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.scanspec.AcceptReject;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.utils.JarUtils;
@@ -80,15 +82,65 @@ public class ClassGraph {
                             Runtime.getRuntime().availableProcessors() * 1.25) //
     );
 
-    /** If non-null, log while scanning. */
+    /**
+     * Method to use to attempt to circumvent encapsulation in JDK 16+, in order to get access to a classloader's
+     * private classpath.
+     */
+    public enum CircumventEncapsulationMethod {
+        /**
+         * Use the reflection API and {@link AccessibleObject#setAccessible(boolean)} to try to gain access to
+         * private classpath fields or methods in order to determine the classpath.
+         */
+        NONE,
+
+        /**
+         * Use the <a href="https://github.com/toolfactory/narcissus">Narcissus</a> library to try to gain access to
+         * private classloader fields or methods in order to determine the classpath.
+         */
+        NARCISSUS,
+
+        /**
+         * Use the <a href="https://github.com/toolfactory/jvm-driver">JVM-Driver</a> library to try to gain access
+         * to private classloader fields or methods in order to determine the classpath.
+         */
+        JVM_DRIVER;
+    }
+
+    /**
+     * If you are running on JDK 16+, the JDK enforces strong encapsulation, and ClassGraph may be unable to read
+     * the classpath from your classloader if the classloader does not make the classpath available via a public
+     * method or field.
+     * 
+     * <p>
+     * To enable a workaround to this, set this static field to {@link CircumventEncapsulationMethod#NARCISSUS} or
+     * {@link CircumventEncapsulationMethod#JVM_DRIVER} before interacting with ClassGraph in any other way, and
+     * also include the <a href="https://github.com/toolfactory/narcissus">Narcissus</a> or
+     * <a href="https://github.com/toolfactory/jvm-driver">JVM-Driver</a> library respectively on the classpath or
+     * module path.
+     * 
+     * <p>
+     * Narcissus uses JNI to circumvent encapsulation and field/method access controls. Narcissus employs a native
+     * code library, and is currently only compiled for Linux x86/x64, Windows x86/x64, and Mac OS X x64 bit.
+     * 
+     * <p>
+     * JVM-Driver uses a pure JVM solution to try to circumvent encapsulation and security controls.
+     */
+    public static CircumventEncapsulationMethod CIRCUMVENT_ENCAPSULATION = CircumventEncapsulationMethod.NONE;
+
+    private final ReflectionUtils reflectionUtils;
+
+    /**
+     * If non-null, log while scanning.
+     */
     private LogNode topLevelLog;
 
     // -------------------------------------------------------------------------------------------------------------
 
     /** Construct a ClassGraph instance. */
     public ClassGraph() {
+        reflectionUtils = new ReflectionUtils();
         // Initialize ScanResult, if this is the first call to ClassGraph constructor
-        ScanResult.init();
+        ScanResult.init(reflectionUtils);
     }
 
     /**
@@ -155,12 +207,14 @@ public class ClassGraph {
     }
 
     /**
-     * Enables the scanning of classfiles, producing {@link ClassInfo} objects in the {@link ScanResult}.
+     * Enables the scanning of classfiles, producing {@link ClassInfo} objects in the {@link ScanResult}. Implicitly
+     * disables {@link #enableMultiReleaseVersions()}.
      *
      * @return this (for method chaining).
      */
     public ClassGraph enableClassInfo() {
         scanSpec.enableClassInfo = true;
+        scanSpec.enableMultiReleaseVersions = false;
         return this;
     }
 
@@ -486,6 +540,22 @@ public class ClassGraph {
     }
 
     /**
+     * Add a classpath element URL filter. The includeClasspathElement method should return true if the {@link URL}
+     * passed to it corresponds to a classpath element that you want to scan.
+     */
+    @FunctionalInterface
+    public interface ClasspathElementURLFilter {
+        /**
+         * Whether or not to include a given classpath element in the scan.
+         *
+         * @param classpathElementURL
+         *            The {@link URL} of a classpath element.
+         * @return true if you want to scan the {@link URL}.
+         */
+        boolean includeClasspathElement(URL classpathElementURL);
+    }
+
+    /**
      * Add a classpath element filter. The provided ClasspathElementFilter should return true if the path string
      * passed to it is a path you want to scan.
      * 
@@ -496,6 +566,20 @@ public class ClassGraph {
      */
     public ClassGraph filterClasspathElements(final ClasspathElementFilter classpathElementFilter) {
         scanSpec.filterClasspathElements(classpathElementFilter);
+        return this;
+    }
+
+    /**
+     * Add a classpath element filter. The provided ClasspathElementFilter should return true if the {@link URL}
+     * passed to it is a URL you want to scan.
+     * 
+     * @param classpathElementURLFilter
+     *            The filter function to use. This function should return true if the classpath element {@link URL}
+     *            should be scanned, and false if not.
+     * @return this (for method chaining).
+     */
+    public ClassGraph filterClasspathElementsByURL(final ClasspathElementURLFilter classpathElementURLFilter) {
+        scanSpec.filterClasspathElements(classpathElementURLFilter);
         return this;
     }
 
@@ -610,10 +694,6 @@ public class ClassGraph {
         enableClassInfo();
         for (final String packageName : packageNames) {
             final String packageNameNormalized = AcceptReject.normalizePackageOrClassName(packageName);
-            if (packageNameNormalized.startsWith("!") || packageNameNormalized.startsWith("-")) {
-                throw new IllegalArgumentException(
-                        "This style of accepting/rejecting is no longer supported: " + packageNameNormalized);
-            }
             // Accept package
             scanSpec.packageAcceptReject.addToAccept(packageNameNormalized);
             final String path = AcceptReject.packageNameToPath(packageNameNormalized);
@@ -636,12 +716,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptPackages(String...)} instead.
+     * Use {@link #acceptPackages(String...)} instead.
      *
      * @param packageNames
      *            The fully-qualified names of packages to scan (using '.' as a separator). May include a glob
      *            wildcard ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptPackages(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistPackages(final String... packageNames) {
@@ -681,12 +762,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptPaths(String...)} instead.
+     * Use {@link #acceptPaths(String...)} instead.
      *
      * @param paths
      *            The paths to scan, relative to the package root of the classpath element (with '/' as a
      *            separator). May include a glob wildcard ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptPaths(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistPaths(final String... paths) {
@@ -729,13 +811,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptPackagesNonRecursive(String...)} instead.
+     * Use {@link #acceptPackagesNonRecursive(String...)} instead.
      *
      * @param packageNames
      *            The fully-qualified names of packages to scan (with '.' as a separator). May not include a glob
      *            wildcard ({@code '*'}).
-     * 
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptPackagesNonRecursive(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistPackagesNonRecursive(final String... packageNames) {
@@ -772,12 +854,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptPathsNonRecursive(String...)} instead.
+     * Use {@link #acceptPathsNonRecursive(String...)} instead.
      *
      * @param paths
      *            The paths to scan, relative to the package root of the classpath element (with '/' as a
      *            separator). May not include a glob wildcard ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptPathsNonRecursive(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistPathsNonRecursive(final String... paths) {
@@ -818,12 +901,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectPackages(String...)} instead.
+     * Use {@link #rejectPackages(String...)} instead.
      *
      * @param packageNames
      *            The fully-qualified names of packages to reject (with '.' as a separator). May include a glob
      *            wildcard ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectPackages(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistPackages(final String... packageNames) {
@@ -858,11 +942,12 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectPaths(String...)} instead.
+     * Use {@link #rejectPaths(String...)} instead.
      *
      * @param paths
      *            The paths to reject (with '/' as a separator). May include a glob wildcard ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectPaths(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistPaths(final String... paths) {
@@ -878,16 +963,13 @@ public class ClassGraph {
      *
      * 
      * @param classNames
-     *            The fully-qualified names of classes to scan (using '.' as a separator). May not include a glob
-     *            wildcard ({@code '*'}).
+     *            The fully-qualified names of classes to scan (using '.' as a separator). To match a class name by
+     *            glob in any package, you must include a package glob too, e.g. {@code "*.*Suffix"}.
      * @return this (for method chaining).
      */
     public ClassGraph acceptClasses(final String... classNames) {
         enableClassInfo();
         for (final String className : classNames) {
-            if (className.contains("*")) {
-                throw new IllegalArgumentException("Cannot use a glob wildcard here: " + className);
-            }
             final String classNameNormalized = AcceptReject.normalizePackageOrClassName(className);
             // Accept the class itself
             scanSpec.classAcceptReject.addToAccept(classNameNormalized);
@@ -903,12 +985,12 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptClasses(String...)} instead.
-     * 
+     * Use {@link #acceptClasses(String...)} instead.
+     *
      * @param classNames
-     *            The fully-qualified names of classes to scan (using '.' as a separator). May not include a glob
-     *            wildcard ({@code '*'}).
+     *            The fully-qualified names of classes to scan (using '.' as a separator).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptClasses(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistClasses(final String... classNames) {
@@ -923,16 +1005,13 @@ public class ClassGraph {
      * N.B. Automatically calls {@link #enableClassInfo()}.
      *
      * @param classNames
-     *            The fully-qualified names of classes to reject (using '.' as a separator). May not include a glob
-     *            wildcard ({@code '*'}).
+     *            The fully-qualified names of classes to reject (using '.' as a separator). To match a class name
+     *            by glob in any package, you must include a package glob too, e.g. {@code "*.*Suffix"}.
      * @return this (for method chaining).
      */
     public ClassGraph rejectClasses(final String... classNames) {
         enableClassInfo();
         for (final String className : classNames) {
-            if (className.contains("*")) {
-                throw new IllegalArgumentException("Cannot use a glob wildcard here: " + className);
-            }
             final String classNameNormalized = AcceptReject.normalizePackageOrClassName(className);
             scanSpec.classAcceptReject.addToReject(classNameNormalized);
             scanSpec.classfilePathAcceptReject
@@ -942,12 +1021,12 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectClasses(String...)} instead.
+     * Use {@link #rejectClasses(String...)} instead.
      *
      * @param classNames
-     *            The fully-qualified names of classes to reject (using '.' as a separator). May not include a glob
-     *            wildcard ({@code '*'}).
+     *            The fully-qualified names of classes to reject (using '.' as a separator).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectClasses(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistClasses(final String... classNames) {
@@ -974,12 +1053,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptJars(String...)} instead.
+     * Use {@link #acceptJars(String...)} instead.
      *
      * @param jarLeafNames
      *            The leafnames of the jars that should be scanned (e.g. {@code "mylib.jar"}). May contain a
      *            wildcard glob ({@code "mylib-*.jar"}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptJars(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistJars(final String... jarLeafNames) {
@@ -1006,12 +1086,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectJars(String...)} instead.
+     * Use {@link #rejectJars(String...)} instead.
      *
      * @param jarLeafNames
      *            The leafnames of the jars that should be scanned (e.g. {@code "badlib.jar"}). May contain a
      *            wildcard glob ({@code "badlib-*.jar"}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectJars(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistJars(final String... jarLeafNames) {
@@ -1041,7 +1122,7 @@ public class ClassGraph {
                 }
                 if (jarLeafName.contains("*")) {
                     // Compare wildcarded pattern against all jars in lib and ext dirs 
-                    final Pattern pattern = AcceptReject.globToPattern(jarLeafName);
+                    final Pattern pattern = AcceptReject.globToPattern(jarLeafName, /* simpleGlob = */ true);
                     boolean found = false;
                     for (final String libOrExtJarPath : SystemJarFinder.getJreLibOrExtJars()) {
                         final String libOrExtJarLeafName = JarUtils.leafName(libOrExtJarPath);
@@ -1099,13 +1180,14 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptLibOrExtJars(String...)} instead.
+     * Use {@link #acceptLibOrExtJars(String...)} instead.
      *
      * @param jarLeafNames
      *            The leafnames of the lib/ext jar(s) that should be scanned (e.g. {@code "mylib.jar"}). May contain
      *            a wildcard glob ({@code '*'}). Note that if you call this method with no parameters, all JRE/JDK
      *            "lib/" or "ext/" jars will be accepted.
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptLibOrExtJars(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistLibOrExtJars(final String... jarLeafNames) {
@@ -1127,13 +1209,14 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectLibOrExtJars(String...)} instead.
+     * Use {@link #rejectLibOrExtJars(String...)} instead.
      *
      * @param jarLeafNames
      *            The leafnames of the lib/ext jar(s) that should not be scanned (e.g.
      *            {@code "jre/lib/badlib.jar"}). May contain a wildcard glob ({@code '*'}). If you call this method
      *            with no parameters, all JRE/JDK {@code "lib/"} or {@code "ext/"} jars will be rejected.
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectLibOrExtJars(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistLibOrExtJars(final String... jarLeafNames) {
@@ -1155,11 +1238,12 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptModules(String...)} instead.
+     * Use {@link #acceptModules(String...)} instead.
      *
      * @param moduleNames
      *            The names of the modules that should be scanned. May contain a wildcard glob ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptModules(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistModules(final String... moduleNames) {
@@ -1181,11 +1265,12 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectModules(String...)} instead.
+     * Use {@link #rejectModules(String...)} instead.
      *
      * @param moduleNames
      *            The names of the modules that should not be scanned. May contain a wildcard glob ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectModules(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistModules(final String... moduleNames) {
@@ -1210,12 +1295,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #acceptClasspathElementsContainingResourcePath(String...)} instead.
+     * Use {@link #acceptClasspathElementsContainingResourcePath(String...)} instead.
      *
      * @param resourcePaths
      *            The resource paths, any of which must be present in a classpath element for the classpath element
      *            to be scanned. May contain a wildcard glob ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #acceptClasspathElementsContainingResourcePath(String...)} instead.
      */
     @Deprecated
     public ClassGraph whitelistClasspathElementsContainingResourcePath(final String... resourcePaths) {
@@ -1240,12 +1326,13 @@ public class ClassGraph {
     }
 
     /**
-     * @deprecated Use {@link #rejectClasspathElementsContainingResourcePath(String...)} instead.
+     * Use {@link #rejectClasspathElementsContainingResourcePath(String...)} instead.
      *
      * @param resourcePaths
      *            The resource paths which cause a classpath not to be scanned if any are present in a classpath
      *            element for the classpath element. May contain a wildcard glob ({@code '*'}).
      * @return this (for method chaining).
+     * @deprecated Use {@link #rejectClasspathElementsContainingResourcePath(String...)} instead.
      */
     @Deprecated
     public ClassGraph blacklistClasspathElementsContainingResourcePath(final String... resourcePaths) {
@@ -1344,6 +1431,31 @@ public class ClassGraph {
         return this;
     }
 
+    /**
+     * If true, provide all versions of a multi-release resource using their multi-release path prefix, instead of
+     * just the one the running JVM would select. Implicitly disables {@link #enableClassInfo()} and all features
+     * depending on it.
+     * 
+     * @return this (for method chaining).
+     */
+    public ClassGraph enableMultiReleaseVersions() {
+        scanSpec.enableMultiReleaseVersions = true;
+
+        scanSpec.enableClassInfo = false;
+        scanSpec.ignoreClassVisibility = false;
+        scanSpec.enableMethodInfo = false;
+        scanSpec.ignoreMethodVisibility = false;
+        scanSpec.enableFieldInfo = false;
+        scanSpec.ignoreFieldVisibility = false;
+        scanSpec.enableStaticFinalFieldConstantInitializerValues = false;
+        scanSpec.enableAnnotationInfo = false;
+        scanSpec.enableInterClassDependencies = false;
+        scanSpec.disableRuntimeInvisibleAnnotations = false;
+        scanSpec.enableExternalClasses = false;
+        scanSpec.enableSystemJarsAndModules = false;
+        return this;
+    }
+
     // -------------------------------------------------------------------------------------------------------------
 
     /**
@@ -1420,7 +1532,7 @@ public class ClassGraph {
                 try {
                     // Call scanner, but ignore the returned ScanResult
                     new Scanner(/* performScan = */ true, scanSpec, executorService, numParallelTasks,
-                            scanResultProcessor, failureHandler, topLevelLog).call();
+                            scanResultProcessor, failureHandler, reflectionUtils, topLevelLog).call();
                 } catch (final InterruptedException | CancellationException | ExecutionException e) {
                     // Call failure handler
                     failureHandler.onFailure(e);
@@ -1448,7 +1560,7 @@ public class ClassGraph {
             final int numParallelTasks) {
         try {
             return executorService.submit(new Scanner(performScan, scanSpec, executorService, numParallelTasks,
-                    /* scanResultProcessor = */ null, /* failureHandler = */ null, topLevelLog));
+                    /* scanResultProcessor = */ null, /* failureHandler = */ null, reflectionUtils, topLevelLog));
         } catch (final InterruptedException e) {
             // Interrupted during the Scanner constructor's execution (specifically, by getModuleOrder(),
             // which is unlikely to ever actually be interrupted -- but this exception needs to be caught).
@@ -1520,10 +1632,9 @@ public class ClassGraph {
             return scanResult;
 
         } catch (final InterruptedException | CancellationException e) {
-            throw ClassGraphException.newClassGraphException("Scan interrupted", e);
+            throw new ClassGraphException("Scan interrupted", e);
         } catch (final ExecutionException e) {
-            throw ClassGraphException.newClassGraphException("Uncaught exception during scan",
-                    InterruptionChecker.getCause(e));
+            throw new ClassGraphException("Uncaught exception during scan", InterruptionChecker.getCause(e));
         }
     }
 
@@ -1580,10 +1691,9 @@ public class ClassGraph {
             return scanResult;
 
         } catch (final InterruptedException | CancellationException e) {
-            throw ClassGraphException.newClassGraphException("Scan interrupted", e);
+            throw new ClassGraphException("Scan interrupted", e);
         } catch (final ExecutionException e) {
-            throw ClassGraphException.newClassGraphException("Uncaught exception during scan",
-                    InterruptionChecker.getCause(e));
+            throw new ClassGraphException("Uncaught exception during scan", InterruptionChecker.getCause(e));
         }
     }
 
@@ -1685,6 +1795,7 @@ public class ClassGraph {
      * @return The {@link ModulePathInfo}.
      */
     public ModulePathInfo getModulePathInfo() {
+        scanSpec.modulePathInfo.getRuntimeInfo(reflectionUtils);
         return scanSpec.modulePathInfo;
     }
 }

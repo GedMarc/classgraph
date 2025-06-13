@@ -31,10 +31,9 @@ package io.github.classgraph;
 import java.io.File;
 import java.net.URI;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.List;
 import java.util.Map;
-import java.util.Map.Entry;
-import java.util.Queue;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
@@ -49,7 +48,7 @@ import nonapi.io.github.classgraph.utils.JarUtils;
 import nonapi.io.github.classgraph.utils.LogNode;
 
 /** A classpath element (a directory or jarfile on the classpath). */
-abstract class ClasspathElement {
+abstract class ClasspathElement implements Comparable<ClasspathElement> {
     /** The index of the classpath element within the classpath or module path. */
     int classpathElementIdx;
 
@@ -72,16 +71,18 @@ abstract class ClasspathElement {
     boolean containsSpecificallyAcceptedClasspathElementResourcePath;
 
     /**
+     * The index of the classpath element within the parent classpath element (e.g. for classpath elements added via
+     * a Class-Path entry in the manifest). Set to -1 initially in case the same ClasspathElement is present twice
+     * in the classpath, as a child of different parent ClasspathElements.
+     */
+    final int classpathElementIdxWithinParent;
+
+    /**
      * The child classpath elements, keyed by the order of the child classpath element within the Class-Path entry
      * of the manifest file the child classpath element was listed in (or the position of the file within the sorted
      * entries of a lib directory).
      */
-    final Queue<Entry<Integer, ClasspathElement>> childClasspathElementsIndexed = new ConcurrentLinkedQueue<>();
-
-    /**
-     * The child classpath elements, ordered by order within the parent classpath element.
-     */
-    List<ClasspathElement> childClasspathElementsOrdered;
+    Collection<ClasspathElement> childClasspathElements = new ConcurrentLinkedQueue<>();
 
     /**
      * Resources found within this classpath element that were accepted and not rejected. (Only written by one
@@ -104,6 +105,9 @@ abstract class ClasspathElement {
     /** The classloader that this classpath element was obtained from. */
     protected ClassLoader classLoader;
 
+    /** The package root within the jarfile or Path. */
+    protected String packageRootPrefix;
+
     /**
      * The name of the module from the {@code module-info.class} module descriptor, if one is present in the root of
      * the classpath element.
@@ -113,19 +117,39 @@ abstract class ClasspathElement {
     /** The scan spec. */
     final ScanSpec scanSpec;
 
+    /** The ScanResult that the classpath element came from. */
+    protected ScanResult scanResult;
+
     // -------------------------------------------------------------------------------------------------------------
 
     /**
      * A classpath element.
      *
-     * @param classLoader
-     *            the classloader
+     * @param workUnit
+     *            the work unit
      * @param scanSpec
      *            the scan spec
      */
-    ClasspathElement(final ClassLoader classLoader, final ScanSpec scanSpec) {
-        this.classLoader = classLoader;
+    ClasspathElement(final ClasspathEntryWorkUnit workUnit, final ScanSpec scanSpec) {
+        this.packageRootPrefix = workUnit.packageRootPrefix;
+        this.classpathElementIdxWithinParent = workUnit.classpathElementIdxWithinParent;
+        this.classLoader = workUnit.classLoader;
         this.scanSpec = scanSpec;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    /** Used to set the ScanResult after the scan is complete. */
+    void setScanResult(final ScanResult scanResult) {
+        this.scanResult = scanResult;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    /** Sort in increasing order of classpathElementIdxWithinParent. */
+    @Override
+    public int compareTo(final ClasspathElement other) {
+        return this.classpathElementIdxWithinParent - other.classpathElementIdxWithinParent;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -157,16 +181,16 @@ abstract class ClasspathElement {
      *            the relative path
      * @param log
      *            the log
+     * @return true if path should be scanned
      */
-    protected void checkResourcePathAcceptReject(final String relativePath, final LogNode log) {
+    protected boolean checkResourcePathAcceptReject(final String relativePath, final LogNode log) {
         // Accept/reject classpath elements based on file resource paths
         if (!scanSpec.classpathElementResourcePathAcceptReject.acceptAndRejectAreEmpty()) {
             if (scanSpec.classpathElementResourcePathAcceptReject.isRejected(relativePath)) {
                 if (log != null) {
                     log.log("Reached rejected classpath element resource path, stopping scanning: " + relativePath);
                 }
-                skipClasspathElement = true;
-                return;
+                return false;
             }
             if (scanSpec.classpathElementResourcePathAcceptReject.isSpecificallyAccepted(relativePath)) {
                 if (log != null) {
@@ -175,6 +199,7 @@ abstract class ClasspathElement {
                 containsSpecificallyAcceptedClasspathElementResourcePath = true;
             }
         }
+        return true;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -335,6 +360,23 @@ abstract class ClasspathElement {
         return log.log(String.format("%07d", classpathElementIdx), msg);
     }
 
+    /**
+     * Write entries to log in classpath / module path order.
+     *
+     * @param classpathElementIdx
+     *            the classpath element idx
+     * @param msg
+     *            the log message
+     * @param t
+     *            The exception that was thrown
+     * @param log
+     *            the log
+     * @return the new {@link LogNode}
+     */
+    protected LogNode log(final int classpathElementIdx, final String msg, final Throwable t, final LogNode log) {
+        return log.log(String.format("%07d", classpathElementIdx), msg, t);
+    }
+
     // -------------------------------------------------------------------------------------------------------------
 
     /**
@@ -380,6 +422,14 @@ abstract class ClasspathElement {
      * @return the URI for the classpath element.
      */
     abstract URI getURI();
+
+    /**
+     * Get the URI for this classpath element, and the URIs for any automatic nested package prefixes (e.g.
+     * "spring-boot.jar/BOOT-INF/classes") within this jarfile.
+     *
+     * @return the URI for the classpath element.
+     */
+    abstract List<URI> getAllURIs();
 
     /**
      * Get the file for this classpath element, or null if this is a module with a "jrt:" URI.

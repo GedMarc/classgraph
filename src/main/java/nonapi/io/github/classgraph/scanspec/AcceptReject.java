@@ -245,7 +245,7 @@ public abstract class AcceptReject {
                     this.acceptPatterns = new ArrayList<>();
                 }
                 this.acceptGlobs.add(str);
-                this.acceptPatterns.add(globToPattern(str));
+                this.acceptPatterns.add(globToPattern(str, /* simpleGlob = */ true));
             } else {
                 if (this.accept == null) {
                     this.accept = new HashSet<>();
@@ -301,7 +301,7 @@ public abstract class AcceptReject {
                     this.rejectPatterns = new ArrayList<>();
                 }
                 this.rejectGlobs.add(str);
-                this.rejectPatterns.add(globToPattern(str));
+                this.rejectPatterns.add(globToPattern(str, /* simpleGlob = */ true));
             } else {
                 if (this.reject == null) {
                     this.reject = new HashSet<>();
@@ -565,15 +565,33 @@ public abstract class AcceptReject {
     }
 
     /**
-     * Convert a spec with a '*' glob character into a regular expression. Replaces "." with "\." and "*" with ".*",
-     * then compiles a regular expression.
+     * Convert a spec with a '*' glob character into a regular expression.
      * 
      * @param glob
      *            The glob string.
+     * @param simpleGlob
+     *            if true, handles simple globs: "*" matches zero or more characters (replaces "." with "\\.", "*"
+     *            with ".*", then compiles a regular expression). If false, handles filesystem-style globs: "**"
+     *            matches zero or more characters, "*" matches zero or more characters other than "/", "?" matches
+     *            one character (replaces "." with "\\.", "**" with ".*", "*" with "[^/]*", and "?" with ".", then
+     *            compiles a regular expression).
      * @return The Pattern created from the glob string.
      */
-    public static Pattern globToPattern(final String glob) {
-        return Pattern.compile("^" + glob.replace(".", "\\.").replace("*", ".*") + "$");
+    public static Pattern globToPattern(final String glob, final boolean simpleGlob) {
+        // TODO: when API is next changed, make all glob behavior consistent between accept/reject criteria
+        // and resource filtering (i.e. enforce simpleGlob == false, at least for accept/reject criteria for
+        // paths, although packages/classes would need different handling because ** should work across
+        // packages of any depth, rather than paths of any number of segments)
+        return Pattern.compile("^" //
+                + (simpleGlob //
+                        ? glob.replace(".", "\\.") //
+                                .replace("*", ".*") //
+                        : glob.replace(".", "\\.") //
+                                .replace("*", "[^/]*") //
+                                .replace("[^/]*[^/]*", ".*") //
+                                .replace('?', '.') //
+                ) //
+                + "$");
     }
 
     /**

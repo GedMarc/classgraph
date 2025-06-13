@@ -98,12 +98,15 @@ public class Issue152Test {
                     .getMethodInfo("testMethod") //
                     .get(0).toString()) //
                             .isEqualTo("public java.util.Set<java.lang.Integer> testMethod("
-                                    + "java.util.List<java.lang.String[]>, java.util.Map<java.lang.String, "
-                                    + "java.util.Map<java.lang.Integer, java.lang.Boolean>>, double[][][], int, "
-                                    + TestType.class.getName() + "[], java.util.Set<? extends "
-                                    + TestType.class.getName() + ">, java.util.List<? super "
-                                    + TestType.class.getName()
-                                    + ">, java.util.Map<java.lang.Integer, ?>, java.util.Set<java.lang.String>[])");
+                                    + "final java.util.List<java.lang.String[]> param0, "
+                                    + "final java.util.Map<java.lang.String, "
+                                    + "java.util.Map<java.lang.Integer, java.lang.Boolean>> param2, "
+                                    + "final double[][][] param3, final int param4, final "
+                                    + TestType.class.getName() + "[] param5, " + "final java.util.Set<? extends "
+                                    + TestType.class.getName() + "> param6, " + "final java.util.List<? super "
+                                    + TestType.class.getName() + "> param7, "
+                                    + "final java.util.Map<java.lang.Integer, ?> param8, "
+                                    + "final java.util.Set<java.lang.String>[] param9)");
             assertThat(classInfo //
                     .getFieldInfo("testField").toString()) //
                             .isEqualTo("public java.util.Map<java.lang.Integer, java.util.Map<java.lang.String, "

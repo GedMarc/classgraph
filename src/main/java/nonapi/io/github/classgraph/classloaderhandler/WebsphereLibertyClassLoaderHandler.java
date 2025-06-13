@@ -32,7 +32,6 @@ package nonapi.io.github.classgraph.classloaderhandler;
 
 import java.io.File;
 import java.net.URL;
-import java.util.Arrays;
 import java.util.Collection;
 import java.util.Collections;
 import java.util.HashSet;
@@ -40,9 +39,9 @@ import java.util.List;
 
 import nonapi.io.github.classgraph.classpath.ClassLoaderOrder;
 import nonapi.io.github.classgraph.classpath.ClasspathOrder;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.utils.LogNode;
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
 
 /**
  * WebsphereLibertyClassLoaderHandler.
@@ -108,55 +107,56 @@ class WebsphereLibertyClassLoaderHandler implements ClassLoaderHandler {
      *            the containerClassLoader object
      * @return Collection of path objects as a {@link URL} or {@link String}.
      */
-    private static Collection<Object> getPaths(final Object containerClassLoader) {
+    private static Collection<Object> getPaths(final Object containerClassLoader,
+            final ReflectionUtils reflectionUtils) {
         if (containerClassLoader == null) {
-            return Collections.<Object> emptyList();
+            return Collections.emptyList();
         }
 
         // Expecting this to be an instance of
         // "com.ibm.ws.classloading.internal.ContainerClassLoader$UniversalContainer".
         // Call "getContainerURLs" to get its container's classpath.
-        Collection<Object> urls = callGetUrls(containerClassLoader, "getContainerURLs");
+        Collection<Object> urls = callGetUrls(containerClassLoader, "getContainerURLs", reflectionUtils);
         if (urls != null && !urls.isEmpty()) {
             return urls;
         }
 
         // "getContainerURLs" didn't work, try getting the container object...
-        final Object container = ReflectionUtils.getFieldVal(containerClassLoader, "container", false);
+        final Object container = reflectionUtils.getFieldVal(false, containerClassLoader, "container");
         if (container == null) {
-            return Collections.<Object> emptyList();
+            return Collections.emptyList();
         }
 
         // Should be an instance of "com.ibm.wsspi.adaptable.module.Container".
         // Call "getURLs" to get its classpath.
-        urls = callGetUrls(container, "getURLs");
+        urls = callGetUrls(container, "getURLs", reflectionUtils);
         if (urls != null && !urls.isEmpty()) {
             return urls;
         }
 
         // "getURLs" did not work, reverting to previous logic of introspection of the "delegate".
-        final Object delegate = ReflectionUtils.getFieldVal(container, "delegate", false);
+        final Object delegate = reflectionUtils.getFieldVal(false, container, "delegate");
         if (delegate == null) {
-            return Collections.<Object> emptyList();
+            return Collections.emptyList();
         }
 
-        final String path = (String) ReflectionUtils.getFieldVal(delegate, "path", false);
+        final String path = (String) reflectionUtils.getFieldVal(false, delegate, "path");
         if (path != null && path.length() > 0) {
-            return Arrays.asList((Object) path);
+            return Collections.singletonList((Object) path);
         }
 
-        final Object base = ReflectionUtils.getFieldVal(delegate, "base", false);
+        final Object base = reflectionUtils.getFieldVal(false, delegate, "base");
         if (base == null) {
             // giving up.
-            return Collections.<Object> emptyList();
+            return Collections.emptyList();
         }
 
-        final Object archiveFile = ReflectionUtils.getFieldVal(base, "archiveFile", false);
+        final Object archiveFile = reflectionUtils.getFieldVal(false, base, "archiveFile");
         if (archiveFile != null) {
             final File file = (File) archiveFile;
-            return Arrays.asList((Object) file.getAbsolutePath());
+            return Collections.singletonList((Object) file.getAbsolutePath());
         }
-        return Collections.<Object> emptyList();
+        return Collections.emptyList();
     }
 
     /**
@@ -171,11 +171,12 @@ class WebsphereLibertyClassLoaderHandler implements ClassLoaderHandler {
      * of the locations on disk that contribute to this container"
      */
     @SuppressWarnings("unchecked")
-    private static Collection<Object> callGetUrls(final Object container, final String methodName) {
+    private static Collection<Object> callGetUrls(final Object container, final String methodName,
+            final ReflectionUtils reflectionUtils) {
         if (container != null) {
             try {
-                final Collection<Object> results = (Collection<Object>) ReflectionUtils.invokeMethod(container,
-                        methodName, false);
+                final Collection<Object> results = (Collection<Object>) reflectionUtils.invokeMethod(false,
+                        container, methodName);
                 if (results != null && !results.isEmpty()) {
                     final Collection<Object> allUrls = new HashSet<>();
                     for (final Object result : results) {
@@ -196,7 +197,7 @@ class WebsphereLibertyClassLoaderHandler implements ClassLoaderHandler {
                 /* ignore */
             }
         }
-        return Collections.<Object> emptyList();
+        return Collections.emptyList();
     }
 
     /**
@@ -214,16 +215,17 @@ class WebsphereLibertyClassLoaderHandler implements ClassLoaderHandler {
     public static void findClasspathOrder(final ClassLoader classLoader, final ClasspathOrder classpathOrder,
             final ScanSpec scanSpec, final LogNode log) {
         Object smartClassPath;
-        final Object appLoader = ReflectionUtils.getFieldVal(classLoader, "appLoader", false);
+        final Object appLoader = classpathOrder.reflectionUtils.getFieldVal(false, classLoader, "appLoader");
         if (appLoader != null) {
-            smartClassPath = ReflectionUtils.getFieldVal(appLoader, "smartClassPath", false);
+            smartClassPath = classpathOrder.reflectionUtils.getFieldVal(false, appLoader, "smartClassPath");
         } else {
-            smartClassPath = ReflectionUtils.getFieldVal(classLoader, "smartClassPath", false);
+            smartClassPath = classpathOrder.reflectionUtils.getFieldVal(false, classLoader, "smartClassPath");
         }
         if (smartClassPath != null) {
             // "com.ibm.ws.classloading.internal.ContainerClassLoader$SmartClassPath" 
             // interface specifies a "getClassPath" to return all urls that makeup its path.
-            final Collection<Object> paths = callGetUrls(smartClassPath, "getClassPath");
+            final Collection<Object> paths = callGetUrls(smartClassPath, "getClassPath",
+                    classpathOrder.reflectionUtils);
             if (!paths.isEmpty()) {
                 for (final Object path : paths) {
                     classpathOrder.addClasspathEntry(path, classLoader, scanSpec, log);
@@ -231,11 +233,12 @@ class WebsphereLibertyClassLoaderHandler implements ClassLoaderHandler {
             } else {
                 // "getClassPath" didn't work... reverting to looping over "classPath" elements.
                 @SuppressWarnings("unchecked")
-                final List<Object> classPathElements = (List<Object>) ReflectionUtils.getFieldVal(smartClassPath,
-                        "classPath", false);
+                final List<Object> classPathElements = (List<Object>) classpathOrder.reflectionUtils
+                        .getFieldVal(false, smartClassPath, "classPath");
                 if (classPathElements != null && !classPathElements.isEmpty()) {
                     for (final Object classPathElement : classPathElements) {
-                        final Collection<Object> subPaths = getPaths(classPathElement);
+                        final Collection<Object> subPaths = getPaths(classPathElement,
+                                classpathOrder.reflectionUtils);
                         for (final Object path : subPaths) {
                             classpathOrder.addClasspathEntry(path, classLoader, scanSpec, log);
                         }

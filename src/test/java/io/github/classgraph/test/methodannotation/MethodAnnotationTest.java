@@ -53,8 +53,8 @@ public class MethodAnnotationTest {
         try (ScanResult scanResult = new ClassGraph()
                 .acceptPackages(MethodAnnotationTest.class.getPackage().getName()).enableClassInfo()
                 .enableMethodInfo().enableAnnotationInfo().scan()) {
-            final List<String> testClasses = scanResult
-                    .getClassesWithMethodAnnotation(ExternalAnnotation.class.getName()).getNames();
+            final List<String> testClasses = scanResult.getClassesWithMethodAnnotation(ExternalAnnotation.class)
+                    .getNames();
             assertThat(testClasses).isEmpty();
         }
     }
@@ -68,7 +68,7 @@ public class MethodAnnotationTest {
                 .acceptPackages(MethodAnnotationTest.class.getPackage().getName()).enableClassInfo()
                 .enableMethodInfo().enableAnnotationInfo().ignoreMethodVisibility().scan()) {
             final ClassInfoList classesWithMethodAnnotation = scanResult
-                    .getClassesWithMethodAnnotation(ExternalAnnotation.class.getName());
+                    .getClassesWithMethodAnnotation(ExternalAnnotation.class);
             final List<String> testClasses = classesWithMethodAnnotation.getNames();
             assertThat(testClasses).containsOnly(MethodAnnotationTest.class.getName());
             boolean found = false;

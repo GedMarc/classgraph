@@ -363,15 +363,12 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     @Deprecated
     public void forEachByteArray(final ByteArrayConsumer byteArrayConsumer, final boolean ignoreIOExceptions) {
         for (final Resource resource : this) {
-            try {
-                final byte[] resourceContent = resource.load();
-                byteArrayConsumer.accept(resource, resourceContent);
+            try (final Resource resourceToClose = resource) {
+                byteArrayConsumer.accept(resourceToClose, resourceToClose.load());
             } catch (final IOException e) {
                 if (!ignoreIOExceptions) {
                     throw new IllegalArgumentException("Could not load resource " + resource, e);
                 }
-            } finally {
-                resource.close();
             }
         }
     }
@@ -403,13 +400,10 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
      */
     public void forEachByteArrayIgnoringIOException(final ByteArrayConsumer byteArrayConsumer) {
         for (final Resource resource : this) {
-            try {
-                final byte[] resourceContent = resource.load();
-                byteArrayConsumer.accept(resource, resourceContent);
+            try (Resource resourceToClose = resource) {
+                byteArrayConsumer.accept(resourceToClose, resourceToClose.load());
             } catch (final IOException e) {
                 // Ignore
-            } finally {
-                resource.close();
             }
         }
     }
@@ -427,11 +421,8 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     public void forEachByteArrayThrowingIOException(
             final ByteArrayConsumerThrowsIOException byteArrayConsumerThrowsIOException) throws IOException {
         for (final Resource resource : this) {
-            try {
-                final byte[] resourceContent = resource.load();
-                byteArrayConsumerThrowsIOException.accept(resource, resourceContent);
-            } finally {
-                resource.close();
+            try (Resource resourceToClose = resource) {
+                byteArrayConsumerThrowsIOException.accept(resourceToClose, resourceToClose.load());
             }
         }
     }
@@ -492,14 +483,12 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     public void forEachInputStream(final InputStreamConsumer inputStreamConsumer,
             final boolean ignoreIOExceptions) {
         for (final Resource resource : this) {
-            try {
-                inputStreamConsumer.accept(resource, resource.open());
+            try (final Resource resourceToClose = resource) {
+                inputStreamConsumer.accept(resourceToClose, resourceToClose.open());
             } catch (final IOException e) {
                 if (!ignoreIOExceptions) {
                     throw new IllegalArgumentException("Could not load resource " + resource, e);
                 }
-            } finally {
-                resource.close();
             }
         }
     }
@@ -531,12 +520,10 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
      */
     public void forEachInputStreamIgnoringIOException(final InputStreamConsumer inputStreamConsumer) {
         for (final Resource resource : this) {
-            try {
-                inputStreamConsumer.accept(resource, resource.open());
+            try (final Resource resourceToClose = resource) {
+                inputStreamConsumer.accept(resourceToClose, resourceToClose.open());
             } catch (final IOException e) {
                 // Ignore
-            } finally {
-                resource.close();
             }
         }
     }
@@ -555,10 +542,8 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     public void forEachInputStreamThrowingIOException(
             final InputStreamConsumerThrowsIOException inputStreamConsumerThrowsIOException) throws IOException {
         for (final Resource resource : this) {
-            try {
-                inputStreamConsumerThrowsIOException.accept(resource, resource.open());
-            } finally {
-                resource.close();
+            try (final Resource resourceToClose = resource) {
+                inputStreamConsumerThrowsIOException.accept(resourceToClose, resourceToClose.open());
             }
         }
     }
@@ -617,15 +602,12 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     @Deprecated
     public void forEachByteBuffer(final ByteBufferConsumer byteBufferConsumer, final boolean ignoreIOExceptions) {
         for (final Resource resource : this) {
-            try {
-                final ByteBuffer byteBuffer = resource.read();
-                byteBufferConsumer.accept(resource, byteBuffer);
+            try (final Resource resourceToClose = resource) {
+                byteBufferConsumer.accept(resourceToClose, resourceToClose.read());
             } catch (final IOException e) {
                 if (!ignoreIOExceptions) {
                     throw new IllegalArgumentException("Could not load resource " + resource, e);
                 }
-            } finally {
-                resource.close();
             }
         }
     }
@@ -657,13 +639,10 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
      */
     public void forEachByteBufferIgnoringIOException(final ByteBufferConsumer byteBufferConsumer) {
         for (final Resource resource : this) {
-            try {
-                final ByteBuffer byteBuffer = resource.read();
-                byteBufferConsumer.accept(resource, byteBuffer);
+            try (final Resource resourceToClose = resource) {
+                byteBufferConsumer.accept(resourceToClose, resourceToClose.read());
             } catch (final IOException e) {
                 // Ignore
-            } finally {
-                resource.close();
             }
         }
     }
@@ -681,11 +660,8 @@ public class ResourceList extends PotentiallyUnmodifiableList<Resource> implemen
     public void forEachByteBufferThrowingIOException(
             final ByteBufferConsumerThrowsIOException byteBufferConsumerThrowsIOException) throws IOException {
         for (final Resource resource : this) {
-            try {
-                final ByteBuffer byteBuffer = resource.read();
-                byteBufferConsumerThrowsIOException.accept(resource, byteBuffer);
-            } finally {
-                resource.close();
+            try (final Resource resourceToClose = resource) {
+                byteBufferConsumerThrowsIOException.accept(resourceToClose, resourceToClose.read());
             }
         }
     }

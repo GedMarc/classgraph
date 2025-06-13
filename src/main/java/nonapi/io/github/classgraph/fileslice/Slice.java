@@ -36,10 +36,9 @@ import java.io.InputStream;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.util.concurrent.atomic.AtomicBoolean;
-import java.util.zip.Inflater;
 
+import io.github.classgraph.Resource;
 import nonapi.io.github.classgraph.fastzipfilereader.NestedJarHandler;
-import nonapi.io.github.classgraph.fileslice.reader.ClassfileReader;
 import nonapi.io.github.classgraph.fileslice.reader.RandomAccessReader;
 import nonapi.io.github.classgraph.utils.FileUtils;
 
@@ -152,6 +151,19 @@ public abstract class Slice implements Closeable {
      *             if an inflater cannot be created for this {@link Slice}.
      */
     public InputStream open() throws IOException {
+        return open(null);
+    }
+
+    /**
+     * Open this {@link Slice} as an {@link InputStream}.
+     *
+     * @param resourceToClose
+     *            the {@link Resource} to close when the returned {@code InputStream} is closed, or null if none.
+     * @return the input stream
+     * @throws IOException
+     *             if an inflater cannot be created for this {@link Slice}.
+     */
+    public InputStream open(final Resource resourceToClose) throws IOException {
         final InputStream rawInputStream = new InputStream() {
             RandomAccessReader randomAccessReader = randomAccessReader();
             private long currOff;
@@ -221,8 +233,14 @@ public abstract class Slice implements Closeable {
 
             @Override
             public void close() {
+                if (resourceToClose != null) {
+                    try {
+                        resourceToClose.close();
+                    } catch (final Exception e) {
+                        // Ignore
+                    }
+                }
                 closed.getAndSet(true);
-                // Nothing to close
             }
         };
         return isDeflatedZipEntry ? nestedJarHandler.openInflaterInputStream(rawInputStream) : rawInputStream;
@@ -234,22 +252,6 @@ public abstract class Slice implements Closeable {
      * @return the random access reader
      */
     public abstract RandomAccessReader randomAccessReader();
-
-    /**
-     * Open this {@link Slice} for buffered sequential reading. Make sure you close this when you have finished with
-     * it, in order to recycle any {@link Inflater} instances.
-     *
-     * @return the classfile reader
-     * @throws IOException
-     *             Signals that an I/O exception has occurred.
-     */
-    public ClassfileReader openClassfileReader() throws IOException {
-        if (sliceLength > FileUtils.MAX_BUFFER_SIZE) {
-            throw new IllegalArgumentException(
-                    "Cannot open slices larger than 2GB for sequential buffered reading");
-        }
-        return new ClassfileReader(this);
-    }
 
     /**
      * Load the slice as a byte array.

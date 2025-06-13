@@ -42,7 +42,7 @@ import java.util.List;
 import java.util.Set;
 
 import io.github.classgraph.ClassGraph.ClasspathElementFilter;
-import io.github.classgraph.ClassGraphException;
+import io.github.classgraph.ClassGraph.ClasspathElementURLFilter;
 import io.github.classgraph.ClassInfo;
 import io.github.classgraph.ModulePathInfo;
 import io.github.classgraph.ScanResult;
@@ -209,7 +209,7 @@ public class ScanSpec {
     public List<Object> overrideClasspath;
 
     /** If non-null, a list of filter operations to apply to classpath elements. */
-    public transient List<ClasspathElementFilter> classpathElementFilters;
+    public transient List<Object> classpathElementFilters;
 
     /** Whether to initialize classes when loading them. */
     public boolean initializeLoadedClasses;
@@ -258,6 +258,9 @@ public class ScanSpec {
     /** If true, use a {@link MappedByteBuffer} rather than the {@link FileChannel} API to access file content. */
     public boolean enableMemoryMapping;
 
+    /** If true, all multi-release versions of a resource are found. */
+    public boolean enableMultiReleaseVersions;
+
     // -------------------------------------------------------------------------------------------------------------
 
     /** Constructor for deserialization. */
@@ -274,7 +277,7 @@ public class ScanSpec {
                 try {
                     ((AcceptReject) field.get(this)).sortPrefixes();
                 } catch (final ReflectiveOperationException e) {
-                    throw ClassGraphException.newClassGraphException("Field is not accessible: " + field, e);
+                    throw new RuntimeException("Field is not accessible: " + field, e);
                 }
             }
         }
@@ -295,6 +298,10 @@ public class ScanSpec {
         if (this.overrideClasspath == null) {
             this.overrideClasspath = new ArrayList<>();
         }
+        if (overrideClasspathElement instanceof ClassLoader) {
+            throw new IllegalArgumentException(
+                    "Need to pass ClassLoader instances to overrideClassLoaders, not overrideClasspath");
+        }
         this.overrideClasspath
                 .add(overrideClasspathElement instanceof String || overrideClasspathElement instanceof URL
                         || overrideClasspathElement instanceof URI ? overrideClasspathElement
@@ -302,18 +309,23 @@ public class ScanSpec {
     }
 
     /**
-     * Add a classpath element filter. The provided ClasspathElementFilter should return true if the path string
-     * passed to it is a path you want to scan.
+     * Add a classpath element filter. The provided {@link ClasspathElementFilter} or
+     * {@link ClasspathElementURLFilter} should return true if the path string or {@link URL} passed to it is a path
+     * that should be scanned.
      * 
-     * @param classpathElementFilter
+     * @param filterLambda
      *            The classpath element filter to apply to all discovered classpath elements, to decide which should
      *            be scanned.
      */
-    public void filterClasspathElements(final ClasspathElementFilter classpathElementFilter) {
+    public void filterClasspathElements(final Object filterLambda) {
+        if (!(filterLambda instanceof ClasspathElementFilter
+                || filterLambda instanceof ClasspathElementURLFilter)) {
+            throw new IllegalArgumentException();
+        }
         if (this.classpathElementFilters == null) {
             this.classpathElementFilters = new ArrayList<>(2);
         }
-        this.classpathElementFilters.add(classpathElementFilter);
+        this.classpathElementFilters.add(filterLambda);
     }
 
     /**
@@ -467,11 +479,7 @@ public class ScanSpec {
      */
     public ScanSpecPathMatch dirAcceptMatchStatus(final String relativePath) {
         // In rejected path
-        if (pathAcceptReject.isRejected(relativePath)) {
-            // The directory is rejected.
-            return ScanSpecPathMatch.HAS_REJECTED_PATH_PREFIX;
-        }
-        if (pathPrefixAcceptReject.isRejected(relativePath)) {
+        if (pathAcceptReject.isRejected(relativePath) || pathPrefixAcceptReject.isRejected(relativePath)) {
             // An prefix of this path is rejected.
             return ScanSpecPathMatch.HAS_REJECTED_PATH_PREFIX;
         }
@@ -499,16 +507,13 @@ public class ScanSpec {
         }
 
         // Ancestor of accepted path
-        if (relativePath.equals("/")) {
-            // The default package is always the ancestor of accepted paths (need to keep recursing)
-            return ScanSpecPathMatch.ANCESTOR_OF_ACCEPTED_PATH;
-        }
-        if (pathAcceptReject.acceptHasPrefix(relativePath)) {
-            // relativePath is an ancestor (prefix) of an accepted path
-            return ScanSpecPathMatch.ANCESTOR_OF_ACCEPTED_PATH;
-        }
-        if (classfilePathAcceptReject.acceptHasPrefix(relativePath)) {
-            // relativePath is an ancestor (prefix) of an accepted class' parent directory
+        if (
+        // The default package is always the ancestor of accepted paths (need to keep recursing)
+        relativePath.equals("/")
+                // relativePath is an ancestor (prefix) of an accepted path
+                || pathAcceptReject.acceptHasPrefix(relativePath)
+                // relativePath is an ancestor (prefix) of an accepted class' parent directory
+                || classfilePathAcceptReject.acceptHasPrefix(relativePath)) {
             return ScanSpecPathMatch.ANCESTOR_OF_ACCEPTED_PATH;
         }
 

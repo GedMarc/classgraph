@@ -107,8 +107,7 @@ public class TestMethodMetaAnnotation {
         try (ScanResult scanResult = new ClassGraph()
                 .acceptPackages(TestMethodMetaAnnotation.class.getPackage().getName()).enableAnnotationInfo()
                 .scan()) {
-            final List<String> testClasses = scanResult.getClassesWithAnnotation(MetaAnnotation.class.getName())
-                    .getNames();
+            final List<String> testClasses = scanResult.getClassesWithAnnotation(MetaAnnotation.class).getNames();
             assertThat(testClasses).containsOnly(MethodAnnotation.class.getName(), ClassAnnotation.class.getName(),
                     MetaAnnotatedClass.class.getName());
         }
@@ -123,7 +122,7 @@ public class TestMethodMetaAnnotation {
         try (ScanResult scanResult = new ClassGraph()
                 .acceptPackages(TestMethodMetaAnnotation.class.getPackage().getName()).enableAnnotationInfo()
                 .scan()) {
-            final List<String> testClasses = scanResult.getClassesWithAnnotation(MetaAnnotation.class.getName())
+            final List<String> testClasses = scanResult.getClassesWithAnnotation(MetaAnnotation.class)
                     .getStandardClasses().getNames();
             assertThat(testClasses).containsOnly(MetaAnnotatedClass.class.getName());
         }
@@ -138,8 +137,8 @@ public class TestMethodMetaAnnotation {
         try (ScanResult scanResult = new ClassGraph()
                 .acceptPackages(TestMethodMetaAnnotation.class.getPackage().getName()).enableMethodInfo()
                 .enableAnnotationInfo().scan()) {
-            final List<String> testClasses = scanResult
-                    .getClassesWithMethodAnnotation(MetaAnnotation.class.getName()).getNames();
+            final List<String> testClasses = scanResult.getClassesWithMethodAnnotation(MetaAnnotation.class)
+                    .getNames();
             assertThat(testClasses).containsOnly(ClassWithMetaAnnotatedMethod.class.getName());
         }
     }

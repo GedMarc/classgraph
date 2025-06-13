@@ -29,9 +29,12 @@
 package io.github.classgraph;
 
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.List;
+import java.util.Objects;
 import java.util.Set;
 
+import io.github.classgraph.Classfile.TypePathNode;
 import nonapi.io.github.classgraph.types.ParseException;
 import nonapi.io.github.classgraph.types.Parser;
 import nonapi.io.github.classgraph.types.TypeUtils;
@@ -46,6 +49,9 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
 
     /** The method signature that this type variable is part of. */
     MethodTypeSignature containingMethodSignature;
+
+    /** The resolved type parameter, if any. */
+    private TypeParameter typeParameterCached;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -85,31 +91,59 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
      *             method or the enclosing class.
      */
     public TypeParameter resolve() {
+        if (typeParameterCached != null) {
+            return typeParameterCached;
+        }
         // Try resolving the type variable against the containing method
         if (containingMethodSignature != null && containingMethodSignature.typeParameters != null
                 && !containingMethodSignature.typeParameters.isEmpty()) {
             for (final TypeParameter typeParameter : containingMethodSignature.typeParameters) {
                 if (typeParameter.name.equals(this.name)) {
+                    typeParameterCached = typeParameter;
                     return typeParameter;
                 }
             }
         }
         // If that failed, try resolving the type variable against the containing class
-        final ClassInfo containingClassInfo = getClassInfo();
-        if (containingClassInfo == null) {
-            throw new IllegalArgumentException("Could not find ClassInfo object for " + definingClassName);
-        }
-        final ClassTypeSignature containingClassSignature = containingClassInfo.getTypeSignature();
-        if (containingClassSignature != null && containingClassSignature.typeParameters != null
-                && !containingClassSignature.typeParameters.isEmpty()) {
-            for (final TypeParameter typeParameter : containingClassSignature.typeParameters) {
-                if (typeParameter.name.equals(this.name)) {
-                    return typeParameter;
+        if (getClassName() != null) {
+            final ClassInfo containingClassInfo = getClassInfo();
+            if (containingClassInfo == null) {
+                throw new IllegalArgumentException("Could not find ClassInfo object for " + definingClassName);
+            }
+            ClassTypeSignature containingClassSignature = null;
+            try {
+                containingClassSignature = containingClassInfo.getTypeSignature();
+            } catch (final Exception e) {
+                // Ignore
+            }
+            if (containingClassSignature != null && containingClassSignature.typeParameters != null
+                    && !containingClassSignature.typeParameters.isEmpty()) {
+                for (final TypeParameter typeParameter : containingClassSignature.typeParameters) {
+                    if (typeParameter.name.equals(this.name)) {
+                        typeParameterCached = typeParameter;
+                        return typeParameter;
+                    }
                 }
             }
         }
-        throw new IllegalArgumentException(
-                "Could not resolve " + name + " against parameters of the defining method or enclosing class");
+        // If that failed, then this is a type variable that cannot be resolved.
+        // Return a new TypeParameter that only has the name set, with no class or interface bounds. (#706)
+        final TypeParameter typeParameter = new TypeParameter(name, null,
+                Collections.<ReferenceTypeSignature> emptyList());
+        typeParameter.setScanResult(scanResult);
+        typeParameterCached = typeParameter;
+        return typeParameter;
+    }
+
+    // -------------------------------------------------------------------------------------------------------------
+
+    @Override
+    protected void addTypeAnnotation(final List<TypePathNode> typePath, final AnnotationInfo annotationInfo) {
+        if (typePath.isEmpty()) {
+            addTypeAnnotation(annotationInfo);
+        } else {
+            throw new IllegalArgumentException("Type variable should have empty typePath");
+        }
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -129,7 +163,8 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
         final char peek = parser.peek();
         if (peek == 'T') {
             parser.next();
-            if (!TypeUtils.getIdentifierToken(parser)) {
+            // Scala can contain '$' in type variable names (#495)
+            if (!TypeUtils.getIdentifierToken(parser, /* stopAtDollarSign = */ false, /* stopAtDot = */ true)) {
                 throw new ParseException(parser, "Could not parse type variable signature");
             }
             parser.expect(';');
@@ -172,7 +207,16 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
      */
     @Override
     protected void findReferencedClassNames(final Set<String> refdClassNames) {
-        // No class names present in type variables
+        // Any class names present in resolved type variables have to be present in enclosing method or class,
+        // so there's no need to look up class references in resolved type variables
+    }
+
+    @Override
+    void setScanResult(final ScanResult scanResult) {
+        super.setScanResult(scanResult);
+        if (typeParameterCached != null) {
+            typeParameterCached.setScanResult(scanResult);
+        }
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -195,8 +239,8 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
         } else if (!(obj instanceof TypeVariableSignature)) {
             return false;
         }
-        final TypeVariableSignature o = (TypeVariableSignature) obj;
-        return o.name.equals(this.name);
+        final TypeVariableSignature other = (TypeVariableSignature) obj;
+        return other.name.equals(this.name) && Objects.equals(other.typeAnnotationInfo, this.typeAnnotationInfo);
     }
 
     /* (non-Javadoc)
@@ -282,11 +326,17 @@ public final class TypeVariableSignature extends ClassRefOrTypeVariableSignature
         }
     }
 
-    /* (non-Javadoc)
-     * @see io.github.classgraph.TypeSignature#toStringInternal(boolean)
-     */
     @Override
-    protected String toStringInternal(final boolean useSimpleNames) {
-        return name;
+    protected void toStringInternal(final boolean useSimpleNames, final AnnotationInfoList annotationsToExclude,
+            final StringBuilder buf) {
+        if (typeAnnotationInfo != null) {
+            for (final AnnotationInfo annotationInfo : typeAnnotationInfo) {
+                if (annotationsToExclude == null || !annotationsToExclude.contains(annotationInfo)) {
+                    annotationInfo.toString(useSimpleNames, buf);
+                    buf.append(' ');
+                }
+            }
+        }
+        buf.append(name);
     }
 }

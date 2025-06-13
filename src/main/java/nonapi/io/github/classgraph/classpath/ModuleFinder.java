@@ -38,10 +38,10 @@ import java.util.List;
 import java.util.Set;
 
 import io.github.classgraph.ModuleRef;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 import nonapi.io.github.classgraph.utils.LogNode;
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
 
 /** A class to find the visible modules. */
 public class ModuleFinder {
@@ -53,6 +53,8 @@ public class ModuleFinder {
 
     /** If true, must forcibly scan {@code java.class.path}, since there was an anonymous module layer. */
     private boolean forceScanJavaClassPath;
+
+    private final ReflectionUtils reflectionUtils;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -76,7 +78,11 @@ public class ModuleFinder {
         return nonSystemModuleRefs;
     }
 
-    /** @return If true, must forcibly scan {@code java.class.path}, since there was an anonymous module layer. */
+    /**
+     * Force scan java class path.
+     *
+     * @return If true, must forcibly scan {@code java.class.path}, since there was an anonymous module layer.
+     */
     public boolean forceScanJavaClassPath() {
         return forceScanJavaClassPath;
     }
@@ -100,14 +106,14 @@ public class ModuleFinder {
      * @param layerOrderOut
      *            the layer order
      */
-    private static void findLayerOrder(final Object /* ModuleLayer */ layer,
+    private void findLayerOrder(final Object /* ModuleLayer */ layer,
             final Set<Object> /* Set<ModuleLayer> */ layerVisited,
             final Set<Object> /* Set<ModuleLayer> */ parentLayers,
             final Deque<Object> /* Deque<ModuleLayer> */ layerOrderOut) {
         if (layerVisited.add(layer)) {
             @SuppressWarnings("unchecked")
-            final List<Object> /* List<ModuleLayer> */ parents = (List<Object>) ReflectionUtils.invokeMethod(layer,
-                    "parents", /* throwException = */ true);
+            final List<Object> /* List<ModuleLayer> */ parents = (List<Object>) reflectionUtils
+                    .invokeMethod(/* throwException = */ true, layer, "parents");
             if (parents != null) {
                 parentLayers.addAll(parents);
                 for (final Object parent : parents) {
@@ -129,7 +135,7 @@ public class ModuleFinder {
      *            the log
      * @return the list
      */
-    private static List<ModuleRef> findModuleRefs(final LinkedHashSet<Object> layers, final ScanSpec scanSpec,
+    private List<ModuleRef> findModuleRefs(final LinkedHashSet<Object> layers, final ScanSpec scanSpec,
             final LogNode log) {
         if (layers.isEmpty()) {
             return Collections.emptyList();
@@ -168,21 +174,21 @@ public class ModuleFinder {
         final Set<Object> /* Set<ModuleReference> */ addedModules = new HashSet<>();
         final LinkedHashSet<ModuleRef> moduleRefOrder = new LinkedHashSet<>();
         for (final Object /* ModuleLayer */ layer : layerOrderFinal) {
-            final Object /* Configuration */ configuration = ReflectionUtils.invokeMethod(layer, "configuration",
-                    /* throwException = */ true);
+            final Object /* Configuration */ configuration = reflectionUtils
+                    .invokeMethod(/* throwException = */ true, layer, "configuration");
             if (configuration != null) {
                 // Get ModuleReferences from layer configuration
                 @SuppressWarnings("unchecked")
-                final Set<Object> /* Set<ResolvedModule> */ modules = (Set<Object>) ReflectionUtils
-                        .invokeMethod(configuration, "modules", /* throwException = */ true);
+                final Set<Object> /* Set<ResolvedModule> */ modules = (Set<Object>) reflectionUtils
+                        .invokeMethod(/* throwException = */ true, configuration, "modules");
                 if (modules != null) {
                     final List<ModuleRef> modulesInLayer = new ArrayList<>();
                     for (final Object /* ResolvedModule */ module : modules) {
-                        final Object /* ModuleReference */ moduleReference = ReflectionUtils.invokeMethod(module,
-                                "reference", /* throwException = */ true);
+                        final Object /* ModuleReference */ moduleReference = reflectionUtils
+                                .invokeMethod(/* throwException = */ true, module, "reference");
                         if (moduleReference != null && addedModules.add(moduleReference)) {
                             try {
-                                modulesInLayer.add(new ModuleRef(moduleReference, layer));
+                                modulesInLayer.add(new ModuleRef(moduleReference, layer, reflectionUtils));
                             } catch (final IllegalArgumentException e) {
                                 if (log != null) {
                                     log.log("Exception while creating ModuleRef for module " + moduleReference, e);
@@ -206,23 +212,25 @@ public class ModuleFinder {
      *            the call stack
      * @param scanSpec
      *            the scan spec
+     * @param scanNonSystemModules
+     *            whether to include unnamed and non-system modules
      * @param log
      *            the log
      * @return the list
      */
     private List<ModuleRef> findModuleRefsFromCallstack(final Class<?>[] callStack, final ScanSpec scanSpec,
-            final LogNode log) {
+            final boolean scanNonSystemModules, final LogNode log) {
         final LinkedHashSet<Object> layers = new LinkedHashSet<>();
         if (callStack != null) {
             for (final Class<?> stackFrameClass : callStack) {
-                final Object /* Module */ module = ReflectionUtils.invokeMethod(stackFrameClass, "getModule",
-                        /* throwException = */ false);
+                final Object /* Module */ module = reflectionUtils.invokeMethod(/* throwException = */ false,
+                        stackFrameClass, "getModule");
                 if (module != null) {
-                    final Object /* ModuleLayer */ layer = ReflectionUtils.invokeMethod(module, "getLayer",
-                            /* throwException = */ true);
+                    final Object /* ModuleLayer */ layer = reflectionUtils.invokeMethod(/* throwException = */ true,
+                            module, "getLayer");
                     if (layer != null) {
                         layers.add(layer);
-                    } else {
+                    } else if (scanNonSystemModules) {
                         // getLayer() returns null for unnamed modules -- still add null to list if it is returned,
                         // so we can get classes from java.class.path 
                         forceScanJavaClassPath = true;
@@ -238,11 +246,11 @@ public class ModuleFinder {
             // Ignored
         }
         if (moduleLayerClass != null) {
-            final Object /* ModuleLayer */ bootLayer = ReflectionUtils.invokeStaticMethod(moduleLayerClass, "boot",
-                    /* throwException = */ false);
+            final Object /* ModuleLayer */ bootLayer = reflectionUtils
+                    .invokeStaticMethod(/* throwException = */ false, moduleLayerClass, "boot");
             if (bootLayer != null) {
                 layers.add(bootLayer);
-            } else {
+            } else if (scanNonSystemModules) {
                 // getLayer() returns null for unnamed modules -- still add null to list if it is returned,
                 // so we can get classes from java.class.path. (I'm not sure if the boot layer can ever
                 // actually be null, but this is here for completeness.)
@@ -261,45 +269,52 @@ public class ModuleFinder {
      *            the callstack.
      * @param scanSpec
      *            The scan spec.
+     * @param scanNonSystemModules
+     *            whether to scan unnamed and non-system modules
+     * @param scanSystemModules
+     *            whether to scan system modules
      * @param log
      *            The log.
      */
-    public ModuleFinder(final Class<?>[] callStack, final ScanSpec scanSpec, final LogNode log) {
-        if (scanSpec.scanModules) {
-            // Get the module resolution order
-            List<ModuleRef> allModuleRefsList = null;
-            if (scanSpec.overrideModuleLayers == null) {
-                // Find module references for classes on callstack, and from system (for JDK9+)
-                if (callStack != null && callStack.length > 0) {
-                    allModuleRefsList = findModuleRefsFromCallstack(callStack, scanSpec, log);
-                }
-            } else {
-                if (log != null) {
-                    final LogNode subLog = log.log("Overriding module layers");
-                    for (final Object moduleLayer : scanSpec.overrideModuleLayers) {
-                        subLog.log(moduleLayer.toString());
-                    }
-                }
-                allModuleRefsList = findModuleRefs(new LinkedHashSet<>(scanSpec.overrideModuleLayers), scanSpec,
-                        log);
+    public ModuleFinder(final Class<?>[] callStack, final ScanSpec scanSpec, final boolean scanNonSystemModules,
+            final boolean scanSystemModules, final ReflectionUtils reflectionUtils, final LogNode log) {
+        this.reflectionUtils = reflectionUtils;
+
+        // Get the module resolution order
+        List<ModuleRef> allModuleRefsList = null;
+        if (scanSpec.overrideModuleLayers == null) {
+            // Find module references for classes on callstack, and from system (for JDK9+)
+            if (callStack != null && callStack.length > 0) {
+                allModuleRefsList = findModuleRefsFromCallstack(callStack, scanSpec, scanNonSystemModules, log);
             }
-            if (allModuleRefsList != null) {
-                // Split modules into system modules and non-system modules
-                systemModuleRefs = new ArrayList<>();
-                nonSystemModuleRefs = new ArrayList<>();
-                for (final ModuleRef moduleRef : allModuleRefsList) {
-                    if (moduleRef != null) {
-                        if (moduleRef.isSystemModule()) {
-                            systemModuleRefs.add(moduleRef);
-                        } else {
-                            nonSystemModuleRefs.add(moduleRef);
-                        }
-                    }
-                }
-            }
-            // Log any identified modules
+        } else {
             if (log != null) {
-                final LogNode sysSubLog = log.log("Found system modules:");
+                final LogNode subLog = log.log("Overriding module layers");
+                for (final Object moduleLayer : scanSpec.overrideModuleLayers) {
+                    subLog.log(moduleLayer.toString());
+                }
+            }
+            allModuleRefsList = findModuleRefs(new LinkedHashSet<>(scanSpec.overrideModuleLayers), scanSpec, log);
+        }
+        if (allModuleRefsList != null) {
+            // Split modules into system modules and non-system modules
+            systemModuleRefs = new ArrayList<>();
+            nonSystemModuleRefs = new ArrayList<>();
+            for (final ModuleRef moduleRef : allModuleRefsList) {
+                if (moduleRef != null) {
+                    final boolean isSystemModule = moduleRef.isSystemModule();
+                    if (isSystemModule && scanSystemModules) {
+                        systemModuleRefs.add(moduleRef);
+                    } else if (!isSystemModule && scanNonSystemModules) {
+                        nonSystemModuleRefs.add(moduleRef);
+                    }
+                }
+            }
+        }
+        // Log any identified modules
+        if (log != null) {
+            if (scanSystemModules) {
+                final LogNode sysSubLog = log.log("System modules found:");
                 if (systemModuleRefs != null && !systemModuleRefs.isEmpty()) {
                     for (final ModuleRef moduleRef : systemModuleRefs) {
                         sysSubLog.log(moduleRef.toString());
@@ -307,7 +322,11 @@ public class ModuleFinder {
                 } else {
                     sysSubLog.log("[None]");
                 }
-                final LogNode nonSysSubLog = log.log("Found non-system modules:");
+            } else {
+                log.log("Scanning of system modules is not enabled");
+            }
+            if (scanNonSystemModules) {
+                final LogNode nonSysSubLog = log.log("Non-system modules found:");
                 if (nonSystemModuleRefs != null && !nonSystemModuleRefs.isEmpty()) {
                     for (final ModuleRef moduleRef : nonSystemModuleRefs) {
                         nonSysSubLog.log(moduleRef.toString());
@@ -315,10 +334,8 @@ public class ModuleFinder {
                 } else {
                     nonSysSubLog.log("[None]");
                 }
-            }
-        } else {
-            if (log != null) {
-                log.log("Module scanning is disabled, because classloaders or classpath was overridden");
+            } else {
+                log.log("Scanning of non-system modules is not enabled");
             }
         }
     }

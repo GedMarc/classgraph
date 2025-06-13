@@ -28,6 +28,7 @@
  */
 package io.github.classgraph;
 
+import java.lang.annotation.Annotation;
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -35,6 +36,8 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 
+import nonapi.io.github.classgraph.scanspec.ScanSpec;
+import nonapi.io.github.classgraph.utils.Assert;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 
 /** Holds metadata about a package encountered during a scan. */
@@ -122,8 +125,21 @@ public class PackageInfo implements Comparable<PackageInfo>, HasName {
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Get a the named annotation on this package, or null if the package does not have the named annotation.
+     * Get a the annotation on this package, or null if the package does not have the annotation.
      * 
+     * @param annotation
+     *            The annotation.
+     * @return An {@link AnnotationInfo} object representing the annotation on this package, or null if the package
+     *         does not have the annotation.
+     */
+    public AnnotationInfo getAnnotationInfo(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getAnnotationInfo(annotation.getName());
+    }
+
+    /**
+     * Get a the named annotation on this package, or null if the package does not have the named annotation.
+     *
      * @param annotationName
      *            The annotation name.
      * @return An {@link AnnotationInfo} object representing the named annotation on this package, or null if the
@@ -148,6 +164,18 @@ public class PackageInfo implements Comparable<PackageInfo>, HasName {
             }
         }
         return annotationInfo;
+    }
+
+    /**
+     * Check if the package has the annotation.
+     *
+     * @param annotation
+     *            The annotation.
+     * @return true if this package has the annotation.
+     */
+    public boolean hasAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return hasAnnotation(annotation.getName());
     }
 
     /**
@@ -270,10 +298,12 @@ public class PackageInfo implements Comparable<PackageInfo>, HasName {
      *            the package name
      * @param packageNameToPackageInfo
      *            a map from package name to package info
+     * @param scanSpec
+     *            the ScanSpec.
      * @return the {@link PackageInfo} for the named package.
      */
     static PackageInfo getOrCreatePackage(final String packageName,
-            final Map<String, PackageInfo> packageNameToPackageInfo) {
+            final Map<String, PackageInfo> packageNameToPackageInfo, final ScanSpec scanSpec) {
         // Get or create PackageInfo object for this package
         PackageInfo packageInfo = packageNameToPackageInfo.get(packageName);
         if (packageInfo != null) {
@@ -287,16 +317,20 @@ public class PackageInfo implements Comparable<PackageInfo>, HasName {
         // If this is not the root package ("")
         if (!packageName.isEmpty()) {
             // Recursively create PackageInfo objects for parent packages (until a parent package that already
-            // exists is reached), and connect each ancestral package to its parent
-            final PackageInfo parentPackageInfo = getOrCreatePackage(getParentPackageName(packageInfo.name),
-                    packageNameToPackageInfo);
-            if (parentPackageInfo != null) {
-                // Link package to parent
-                if (parentPackageInfo.children == null) {
-                    parentPackageInfo.children = new HashSet<>();
+            // exists or that is not accepted is reached), and connect each ancestral package to its parent
+            final String parentPackageName = getParentPackageName(packageInfo.name);
+            if (scanSpec.packageAcceptReject.isAcceptedAndNotRejected(parentPackageName)
+                    || scanSpec.packagePrefixAcceptReject.isAcceptedAndNotRejected(parentPackageName)) {
+                final PackageInfo parentPackageInfo = getOrCreatePackage(parentPackageName,
+                        packageNameToPackageInfo, scanSpec);
+                if (parentPackageInfo != null) {
+                    // Link package to parent
+                    if (parentPackageInfo.children == null) {
+                        parentPackageInfo.children = new HashSet<>();
+                    }
+                    parentPackageInfo.children.add(packageInfo);
+                    packageInfo.parent = parentPackageInfo;
                 }
-                parentPackageInfo.children.add(packageInfo);
-                packageInfo.parent = parentPackageInfo;
             }
         }
 

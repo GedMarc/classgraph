@@ -54,7 +54,10 @@ public class MethodInfoTest {
     /**
      * The Class X.
      */
-    public static class X {
+    public static class X extends Exception {
+        /***/
+        private static final long serialVersionUID = 1L;
+
         /**
          * Method.
          */
@@ -77,6 +80,8 @@ public class MethodInfoTest {
      *            the b
      * @param l
      *            the l
+     * @param xArray
+     *            the x array
      * @param varargs
      *            the varargs
      * @return the int
@@ -95,6 +100,12 @@ public class MethodInfoTest {
     @SuppressWarnings("unused")
     private static String[] privateMethod() {
         return null;
+    }
+
+    public void throwsException() throws X {
+    }
+
+    public <X2 extends X> void throwsGenericException() throws X, X2 {
     }
 
     /**
@@ -127,14 +138,18 @@ public class MethodInfoTest {
                         }
                     }).getAsStrings()).containsOnly( //
                             "@" + ExternalAnnotation.class.getName() //
-                                    + " public final int publicMethodWithArgs"
-                                    + "(java.lang.String, char, long, float[], byte[][], "
-                                    + "java.util.List<java.lang.Float>, " + X.class.getName()
-                                    + "[][][], java.lang.String[]...)",
+                                    + " public final int publicMethodWithArgs(final java.lang.String str, "
+                                    + "final char c, final long j, final float[] f, final byte[][] b, "
+                                    + "final java.util.List<java.lang.Float> l, " + "final " + X.class.getName()
+                                    + "[][][] xArray, " + "final java.lang.String[]... varargs)",
+                            "public void throwsException() throws " + X.class.getName(),
+                            "public <X2 extends " + X.class.getName() + "> void throwsGenericException() throws "
+                                    + X.class.getName() + ", X2",
                             "@" + Test.class.getName() + " public void methodInfoNotEnabled()",
                             "@" + Test.class.getName() + " public void testGetMethodInfo()",
                             "@" + Test.class.getName() + " public void testGetConstructorInfo()",
                             "@" + Test.class.getName() + " public void testGetMethodInfoIgnoringVisibility()",
+                            "@" + Test.class.getName() + " public void testGetThrownExceptions()",
                             "@" + Test.class.getName() + " public void testMethodInfoLoadMethodForArrayArg()");
         }
     }
@@ -168,15 +183,19 @@ public class MethodInfoTest {
                         }
                     }).getAsStrings()).containsOnly( //
                             "@" + ExternalAnnotation.class.getName() //
-                                    + " public final int publicMethodWithArgs"
-                                    + "(java.lang.String, char, long, float[], byte[][], "
-                                    + "java.util.List<java.lang.Float>, " + X.class.getName()
-                                    + "[][][], java.lang.String[]...)",
+                                    + " public final int publicMethodWithArgs(final java.lang.String str, "
+                                    + "final char c, final long j, final float[] f, final byte[][] b, "
+                                    + "final java.util.List<java.lang.Float> l, " + "final " + X.class.getName()
+                                    + "[][][] xArray, " + "final java.lang.String[]... varargs)",
                             "private static java.lang.String[] privateMethod()",
+                            "public void throwsException() throws " + X.class.getName(),
+                            "public <X2 extends " + X.class.getName() + "> void throwsGenericException() throws "
+                                    + X.class.getName() + ", X2",
                             "@" + Test.class.getName() + " public void methodInfoNotEnabled()",
                             "@" + Test.class.getName() + " public void testGetMethodInfo()",
                             "@" + Test.class.getName() + " public void testGetConstructorInfo()",
                             "@" + Test.class.getName() + " public void testGetMethodInfoIgnoringVisibility()",
+                            "@" + Test.class.getName() + " public void testGetThrownExceptions()",
                             "@" + Test.class.getName() + " public void testMethodInfoLoadMethodForArrayArg()");
         }
     }
@@ -204,9 +223,8 @@ public class MethodInfoTest {
                     arrayClassInfoList.add(((ArrayTypeSignature) paramTypeSig).getArrayClassInfo());
                 }
             }
-            assertThat(arrayClassInfoList.toString()).isEqualTo("[class float[], class byte[][], "
-                    + "class io.github.classgraph.test.methodinfo.MethodInfoTest$X[][][], "
-                    + "class java.lang.String[][]]");
+            assertThat(arrayClassInfoList.toString()).isEqualTo("[class float[], class byte[][], " + "class "
+                    + X.class.getName() + "[][][], " + "class java.lang.String[][]]");
             final ArrayClassInfo p1 = arrayClassInfoList.get(1);
             assertThat(p1.loadElementClass()).isEqualTo(byte.class);
             assertThat(p1.loadClass()).isEqualTo(byte[][].class);
@@ -223,6 +241,23 @@ public class MethodInfoTest {
             assertThat(p3.loadClass()).isEqualTo(String[][].class);
             assertThat(p3.getElementClassInfo()).isNull();
             assertThat(p3.getNumDimensions()).isEqualTo(2);
+        }
+    }
+
+    @Test
+    public void testGetThrownExceptions() {
+        try (ScanResult scanResult = new ClassGraph().acceptPackages(MethodInfoTest.class.getPackage().getName())
+                .enableClassInfo().enableMethodInfo().scan()) {
+            MethodInfo mi = scanResult.getClassInfo(MethodInfoTest.class.getName()).getMethodInfo()
+                    .getSingleMethod("throwsException");
+            assertThat(mi.getThrownExceptions()).hasSize(1);
+            assertThat(mi.getThrownExceptions().get(0).getSimpleName()).isEqualTo("X");
+
+            mi = scanResult.getClassInfo(MethodInfoTest.class.getName()).getMethodInfo()
+                    .getSingleMethod("throwsGenericException");
+            assertThat(mi.getThrownExceptions()).hasSize(2);
+            assertThat(mi.getThrownExceptions().get(0).getSimpleName()).isEqualTo("X");
+            assertThat(mi.getThrownExceptions().get(1).getSimpleName()).isEqualTo("X");
         }
     }
 }

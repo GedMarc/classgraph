@@ -36,7 +36,6 @@ import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-import io.github.classgraph.ClassGraphException;
 import nonapi.io.github.classgraph.fastzipfilereader.NestedJarHandler;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 
@@ -65,6 +64,9 @@ public final class JarUtils {
     /** The Constant TRAILING_DOTS. */
     private static final Pattern TRAILING_DOTS = Pattern.compile("\\.$");
 
+    /** The Constant DOUBLE_BACKSHLASH_WITH_COLON. */
+    private static final Pattern DOUBLE_BACKSHLASH_WITH_COLON = Pattern.compile("\\\\:");
+
     /**
      * On everything but Windows, where the path separator is ':', need to treat the colon in these substrings as
      * non-separators, when at the beginning of the string or following a ':'.
@@ -87,8 +89,7 @@ public final class JarUtils {
         for (int i = 0; i < UNIX_NON_PATH_SEPARATORS.length; i++) {
             UNIX_NON_PATH_SEPARATOR_COLON_POSITIONS[i] = UNIX_NON_PATH_SEPARATORS[i].indexOf(':');
             if (UNIX_NON_PATH_SEPARATOR_COLON_POSITIONS[i] < 0) {
-                throw ClassGraphException
-                        .newClassGraphException("Could not find ':' in \"" + UNIX_NON_PATH_SEPARATORS[i] + "\"");
+                throw new RuntimeException("Could not find ':' in \"" + UNIX_NON_PATH_SEPARATORS[i] + "\"");
             }
         }
     }
@@ -195,7 +196,7 @@ public final class JarUtils {
                 final int idx1 = splitPointsSorted.get(i);
                 // Trim, and unescape "\\:"
                 String part = pathStr.substring(idx0 + 1, idx1).trim();
-                part = part.replaceAll("\\\\:", ":");
+                part = DOUBLE_BACKSHLASH_WITH_COLON.matcher(part).replaceAll( ":");
                 // Remove empty path components
                 if (!part.isEmpty()) {
                     parts.add(part);

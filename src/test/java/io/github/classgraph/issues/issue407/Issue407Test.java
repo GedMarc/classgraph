@@ -43,7 +43,7 @@ import io.github.classgraph.ClassGraph;
 import io.github.classgraph.ScanResult;
 
 /**
- * Issue193Test.
+ * Test.
  */
 public class Issue407Test {
     /**

@@ -30,6 +30,7 @@ package io.github.classgraph;
 
 import java.io.Closeable;
 import java.io.File;
+import java.lang.annotation.Annotation;
 import java.lang.ref.WeakReference;
 import java.net.MalformedURLException;
 import java.net.URI;
@@ -50,11 +51,15 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import nonapi.io.github.classgraph.classpath.ClasspathFinder;
 import nonapi.io.github.classgraph.concurrency.AutoCloseableExecutorService;
 import nonapi.io.github.classgraph.fastzipfilereader.NestedJarHandler;
 import nonapi.io.github.classgraph.json.JSONDeserializer;
 import nonapi.io.github.classgraph.json.JSONSerializer;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
+import nonapi.io.github.classgraph.scanspec.AcceptReject;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
+import nonapi.io.github.classgraph.utils.Assert;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 import nonapi.io.github.classgraph.utils.FileUtils;
 import nonapi.io.github.classgraph.utils.JarUtils;
@@ -64,17 +69,21 @@ import nonapi.io.github.classgraph.utils.LogNode;
  * The result of a scan. You should assign a ScanResult in a try-with-resources block, or manually close it when you
  * have finished with the result of a scan.
  */
-public final class ScanResult implements Closeable, AutoCloseable {
+public final class ScanResult implements Closeable {
     /** The order of raw classpath elements. */
     private List<String> rawClasspathEltOrderStrs;
 
-    /** The order of classpath elements, after inner jars have been extracted to temporary files, etc. */
+    /**
+     * The order of classpath elements, after inner jars have been extracted to temporary files, etc.
+     */
     private List<ClasspathElement> classpathOrder;
 
     /** A list of all files that were found in accepted packages. */
     private ResourceList allAcceptedResourcesCached;
 
-    /** The number of times {@link #getResourcesWithPath(String)} has been called. */
+    /**
+     * The number of times {@link #getResourcesWithPath(String)} has been called.
+     */
     private final AtomicInteger getResourcesWithPathCallCount = new AtomicInteger();
 
     /**
@@ -98,17 +107,16 @@ public final class ScanResult implements Closeable, AutoCloseable {
      */
     private Map<File, Long> fileToLastModified;
 
-    /** If true, this {@link ScanResult} was produced by {@link ScanResult#fromJSON(String)}. */
+    /**
+     * If true, this {@link ScanResult} was produced by {@link ScanResult#fromJSON(String)}.
+     */
     private boolean isObtainedFromDeserialization;
 
     /** A custom ClassLoader that can load classes found during the scan. */
     private ClassGraphClassLoader classGraphClassLoader;
 
-    /**
-     * The default order in which ClassLoaders are called to load classes, respecting parent-first/parent-last
-     * delegation order.
-     */
-    private ClassLoader[] classLoaderOrderRespectingParentDelegation;
+    /** The {@link ClasspathFinder}. */
+    ClasspathFinder classpathFinder;
 
     /** The nested jar handler instance. */
     private NestedJarHandler nestedJarHandler;
@@ -118,6 +126,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
 
     /** If true, this ScanResult has already been closed. */
     private final AtomicBoolean closed = new AtomicBoolean(false);
+
+    protected ReflectionUtils reflectionUtils;
 
     /** The toplevel log. */
     private final LogNode topLevelLog;
@@ -142,7 +152,9 @@ public final class ScanResult implements Closeable, AutoCloseable {
     /** The current serialization format. */
     private static final String CURRENT_SERIALIZATION_FORMAT = "10";
 
-    /** A class to hold a serialized ScanResult along with the ScanSpec that was used to scan. */
+    /**
+     * A class to hold a serialized ScanResult along with the ScanSpec that was used to scan.
+     */
     private static class SerializationFormat {
         /** The serialization format. */
         public String format;
@@ -204,15 +216,21 @@ public final class ScanResult implements Closeable, AutoCloseable {
     /**
      * Static initialization (warm up classloading), called when the ClassGraph class is initialized.
      */
-    static void init() {
+    static void init(final ReflectionUtils reflectionUtils) {
         if (!initialized.getAndSet(true)) {
-            // Pre-load non-system classes necessary for calling scanResult.close(), so that classes that need
-            // to be loaded to close resources are already loaded and cached. This was originally for use in
-            // a shutdown hook (#331), which has now been removed, but it is probably still a good idea to
-            // ensure that classes needed to unmap DirectByteBuffer instances are available at init.
-            // We achieve this by mmap'ing a file and then closing it, since the only problematic classes are
-            // the PriviledgedAction anonymous inner classes used by FileUtils::closeDirectByteBuffer.
-            FileUtils.closeDirectByteBuffer(ByteBuffer.allocateDirect(32), /* log = */ null);
+            // Pre-load non-system classes necessary for calling scanResult.close(), so that
+            // classes that need
+            // to be loaded to close resources are already loaded and cached. This was
+            // originally for use in
+            // a shutdown hook (#331), which has now been removed, but it is probably still
+            // a good idea to
+            // ensure that classes needed to unmap DirectByteBuffer instances are available
+            // at init.
+            // We achieve this by mmap'ing a file and then closing it, since the only
+            // problematic classes are
+            // the PriviledgedAction anonymous inner classes used by
+            // FileUtils::closeDirectByteBuffer.
+            FileUtils.closeDirectByteBuffer(ByteBuffer.allocateDirect(32), reflectionUtils, /* log = */ null);
         }
     }
 
@@ -228,8 +246,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
      *            the classpath order
      * @param rawClasspathEltOrderStrs
      *            the raw classpath element order
-     * @param classLoaderOrderRespectingParentDelegation
-     *            the environment classloader order, respecting parent-first or parent-last delegation order
+     * @param classpathFinder
+     *            the {@link ClasspathFinder}
      * @param classNameToClassInfo
      *            a map from class name to class info
      * @param packageNameToPackageInfo
@@ -244,8 +262,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
      *            the toplevel log
      */
     ScanResult(final ScanSpec scanSpec, final List<ClasspathElement> classpathOrder,
-            final List<String> rawClasspathEltOrderStrs,
-            final ClassLoader[] classLoaderOrderRespectingParentDelegation,
+            final List<String> rawClasspathEltOrderStrs, final ClasspathFinder classpathFinder,
             final Map<String, ClassInfo> classNameToClassInfo,
             final Map<String, PackageInfo> packageNameToPackageInfo,
             final Map<String, ModuleInfo> moduleNameToModuleInfo, final Map<File, Long> fileToLastModified,
@@ -253,16 +270,17 @@ public final class ScanResult implements Closeable, AutoCloseable {
         this.scanSpec = scanSpec;
         this.rawClasspathEltOrderStrs = rawClasspathEltOrderStrs;
         this.classpathOrder = classpathOrder;
-        this.classLoaderOrderRespectingParentDelegation = classLoaderOrderRespectingParentDelegation;
+        this.classpathFinder = classpathFinder;
         this.fileToLastModified = fileToLastModified;
         this.classNameToClassInfo = classNameToClassInfo;
         this.packageNameToPackageInfo = packageNameToPackageInfo;
         this.moduleNameToModuleInfo = moduleNameToModuleInfo;
         this.nestedJarHandler = nestedJarHandler;
+        this.reflectionUtils = nestedJarHandler.reflectionUtils;
         this.topLevelLog = topLevelLog;
 
         if (classNameToClassInfo != null) {
-            indexResourcesAndClassInfo();
+            indexResourcesAndClassInfo(topLevelLog);
         }
 
         if (classNameToClassInfo != null) {
@@ -302,20 +320,26 @@ public final class ScanResult implements Closeable, AutoCloseable {
         nonClosedWeakReferences.add(this.weakReference);
     }
 
-    /** Index {@link Resource} and {@link ClassInfo} objects. */
-    private void indexResourcesAndClassInfo() {
+    /**
+     * Index {@link Resource} and {@link ClassInfo} objects.
+     *
+     * @param log
+     *            the log
+     */
+    private void indexResourcesAndClassInfo(final LogNode log) {
         // Add backrefs from Info objects back to this ScanResult
         final Collection<ClassInfo> allClassInfo = classNameToClassInfo.values();
         for (final ClassInfo classInfo : allClassInfo) {
             classInfo.setScanResult(this);
         }
 
-        // If inter-class dependencies are enabled, create placeholder ClassInfo objects for any referenced
+        // If inter-class dependencies are enabled, create placeholder ClassInfo objects
+        // for any referenced
         // classes that were not scanned
         if (scanSpec.enableInterClassDependencies) {
             for (final ClassInfo ci : new ArrayList<>(classNameToClassInfo.values())) {
                 final Set<ClassInfo> refdClassesFiltered = new HashSet<>();
-                for (final ClassInfo refdClassInfo : ci.findReferencedClassInfo()) {
+                for (final ClassInfo refdClassInfo : ci.findReferencedClassInfo(log)) {
                     // Don't add self-references, or references to Object
                     if (refdClassInfo != null && !ci.equals(refdClassInfo)
                             && !refdClassInfo.getName().equals("java.lang.Object")
@@ -379,9 +403,10 @@ public final class ScanResult implements Closeable, AutoCloseable {
         final List<URI> classpathElementOrderURIs = new ArrayList<>();
         for (final ClasspathElement classpathElement : classpathOrder) {
             try {
-                final URI uri = classpathElement.getURI();
-                if (uri != null) {
-                    classpathElementOrderURIs.add(uri);
+                for (final URI uri : classpathElement.getAllURIs()) {
+                    if (uri != null) {
+                        classpathElementOrderURIs.add(uri);
+                    }
                 }
             } catch (final IllegalArgumentException e) {
                 // Skip null location URIs
@@ -402,12 +427,9 @@ public final class ScanResult implements Closeable, AutoCloseable {
             throw new IllegalArgumentException("Cannot use a ScanResult after it has been closed");
         }
         final List<URL> classpathElementOrderURLs = new ArrayList<>();
-        for (final ClasspathElement classpathElement : classpathOrder) {
+        for (final URI uri : getClasspathURIs()) {
             try {
-                final URI uri = classpathElement.getURI();
-                if (uri != null) {
-                    classpathElementOrderURLs.add(uri.toURL());
-                }
+                classpathElementOrderURLs.add(uri.toURL());
             } catch (final IllegalArgumentException | MalformedURLException e) {
                 // Skip "jrt:" URIs and malformed URLs
             }
@@ -446,6 +468,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
      * @return The {@link ModulePathInfo}.
      */
     public ModulePathInfo getModulePathInfo() {
+        scanSpec.modulePathInfo.getRuntimeInfo(reflectionUtils);
         return scanSpec.modulePathInfo;
     }
 
@@ -458,16 +481,18 @@ public final class ScanResult implements Closeable, AutoCloseable {
      * @return A list of all resources (including classfiles and non-classfiles) found in accepted packages.
      */
     public ResourceList getAllResources() {
-        if (allAcceptedResourcesCached == null) {
-            // Index Resource objects by path
-            final ResourceList acceptedResourcesList = new ResourceList();
-            for (final ClasspathElement classpathElt : classpathOrder) {
-                acceptedResourcesList.addAll(classpathElt.acceptedResources);
+        synchronized (this) {
+            if (allAcceptedResourcesCached == null) {
+                // Index Resource objects by path
+                final ResourceList acceptedResourcesList = new ResourceList();
+                for (final ClasspathElement classpathElt : classpathOrder) {
+                    acceptedResourcesList.addAll(classpathElt.acceptedResources);
+                }
+                // Set atomically for thread safety
+                allAcceptedResourcesCached = acceptedResourcesList;
             }
-            // Set atomically for thread safety
-            allAcceptedResourcesCached = acceptedResourcesList;
+            return allAcceptedResourcesCached;
         }
-        return allAcceptedResourcesCached;
     }
 
     /**
@@ -478,19 +503,21 @@ public final class ScanResult implements Closeable, AutoCloseable {
      *         non-classfiles) found in accepted packages.
      */
     public Map<String, ResourceList> getAllResourcesAsMap() {
-        if (pathToAcceptedResourcesCached == null) {
-            final Map<String, ResourceList> pathToAcceptedResourceListMap = new HashMap<>();
-            for (final Resource res : getAllResources()) {
-                ResourceList resList = pathToAcceptedResourceListMap.get(res.getPath());
-                if (resList == null) {
-                    pathToAcceptedResourceListMap.put(res.getPath(), resList = new ResourceList());
+        synchronized (this) {
+            if (pathToAcceptedResourcesCached == null) {
+                final Map<String, ResourceList> pathToAcceptedResourceListMap = new HashMap<>();
+                for (final Resource res : getAllResources()) {
+                    ResourceList resList = pathToAcceptedResourceListMap.get(res.getPath());
+                    if (resList == null) {
+                        pathToAcceptedResourceListMap.put(res.getPath(), resList = new ResourceList());
+                    }
+                    resList.add(res);
                 }
-                resList.add(res);
+                // Set atomically for thread safety
+                pathToAcceptedResourcesCached = pathToAcceptedResourceListMap;
             }
-            // Set atomically for thread safety
-            pathToAcceptedResourcesCached = pathToAcceptedResourceListMap;
+            return pathToAcceptedResourcesCached;
         }
-        return pathToAcceptedResourcesCached;
     }
 
     /**
@@ -508,12 +535,14 @@ public final class ScanResult implements Closeable, AutoCloseable {
         }
         final String path = FileUtils.sanitizeEntryPath(resourcePath, /* removeInitialSlash = */ true,
                 /* removeFinalSlash = */ true);
+        ResourceList matchingResources = null;
         if (getResourcesWithPathCallCount.incrementAndGet() > 3) {
-            // If numerous calls are made, produce and cache a single HashMap for O(1) access time
-            return getAllResourcesAsMap().get(path);
+            // If numerous calls are made, produce and cache a single HashMap for O(1)
+            // access time
+            matchingResources = getAllResourcesAsMap().get(path);
         } else {
-            // If just a few calls are made, directly search for resource with the requested path
-            ResourceList matchingResources = null;
+            // If just a few calls are made, directly search for resource with the requested
+            // path
             for (final ClasspathElement classpathElt : classpathOrder) {
                 for (final Resource res : classpathElt.acceptedResources) {
                     if (res.getPath().equals(path)) {
@@ -524,8 +553,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
                     }
                 }
             }
-            return matchingResources == null ? ResourceList.EMPTY_LIST : matchingResources;
         }
+        return matchingResources == null ? ResourceList.EMPTY_LIST : matchingResources;
     }
 
     /**
@@ -559,13 +588,14 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
-     * @deprecated Use {@link #getResourcesWithPathIgnoringAccept(String)} instead.
+     * Use {@link #getResourcesWithPathIgnoringAccept(String)} instead.
      *
      * @param resourcePath
      *            A complete resource path, relative to the classpath entry package root.
      * @return A list of all resources found in any classpath element, <i>whether in accepted packages or not (as
      *         long as the resource is not rejected)</i>, that have the given path, relative to the package root of
      *         the classpath element. May match several resources, up to one per classpath element.
+     * @deprecated Use {@link #getResourcesWithPathIgnoringAccept(String)} instead.
      */
     @Deprecated
     public ResourceList getResourcesWithPathIgnoringWhitelist(final String resourcePath) {
@@ -633,7 +663,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
-     * Get the list of all resources found in accepted packages that have a path matching the requested pattern.
+     * Get the list of all resources found in accepted packages that have a path matching the requested regex
+     * pattern. See also {{@link #getResourcesMatchingWildcard(String)}.
      *
      * @param pattern
      *            A pattern to match {@link Resource} paths with.
@@ -656,6 +687,36 @@ public final class ScanResult implements Closeable, AutoCloseable {
             }
             return filteredResources;
         }
+    }
+
+    /**
+     * Get the list of all resources found in accepted packages that have a path matching the requested wildcard
+     * string.
+     * 
+     * <p>
+     * The wildcard string may contain:
+     * <ul>
+     * <li>Single asterisks, to match zero or more of any character other than '/'</li>
+     * <li>Double asterisks, to match zero or more of any character</li>
+     * <li>Question marks, to match one character</li>
+     * <li>Any other regexp-style syntax, such as character sets (denoted by square brackets) -- the remainder of
+     * the expression is passed through to the Java regex parser, after escaping dot characters.</li>
+     * </ul>
+     * 
+     * <p>
+     * The wildcard string is translated in a simplistic way into a regex. If you need more complex pattern
+     * matching, use a regex directly, via {@link #getResourcesMatchingPattern(Pattern)}.
+     *
+     * @param wildcardString
+     *            A wildcard (glob) pattern to match {@link Resource} paths with.
+     * @return A list of all resources found in accepted packages that have a path matching the requested wildcard
+     *         string.
+     */
+    public ResourceList getResourcesMatchingWildcard(final String wildcardString) {
+        if (closed.get()) {
+            throw new IllegalArgumentException("Cannot use a ScanResult after it has been closed");
+        }
+        return getResourcesMatchingPattern(AcceptReject.globToPattern(wildcardString, /* simpleGlob = */ false));
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -771,7 +832,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
             for (final ClassInfo dep : ci.getClassDependencies()) {
                 Set<ClassInfo> set = revMapSet.get(dep);
                 if (set == null) {
-                    revMapSet.put(dep, set = new HashSet<ClassInfo>());
+                    revMapSet.put(dep, set = new HashSet<>());
                 }
                 set.add(ci);
             }
@@ -882,6 +943,17 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
+     * Get all subclasses of the superclass.
+     *
+     * @param superclass
+     *            The superclass.
+     * @return A list of subclasses of the superclass, or the empty list if none.
+     */
+    public ClassInfoList getSubclasses(final Class<?> superclass) {
+        return getSubclasses(superclass.getName());
+    }
+
+    /**
      * Get all subclasses of the named superclass.
      *
      * @param superclassName
@@ -923,6 +995,29 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
+     * Get superclasses of the subclass.
+     *
+     * @param subclass
+     *            The subclass.
+     * @return A list of superclasses of the named subclass, or the empty list if none.
+     */
+    public ClassInfoList getSuperclasses(final Class<?> subclass) {
+        return getSuperclasses(subclass.getName());
+    }
+
+    /**
+     * Get classes that have a method with an annotation of the named type.
+     *
+     * @param methodAnnotation
+     *            the method annotation.
+     * @return A list of classes with a method that has an annotation of the named type, or the empty list if none.
+     */
+    public ClassInfoList getClassesWithMethodAnnotation(final Class<? extends Annotation> methodAnnotation) {
+        Assert.isAnnotation(methodAnnotation);
+        return getClassesWithMethodAnnotation(methodAnnotation.getName());
+    }
+
+    /**
      * Get classes that have a method with an annotation of the named type.
      *
      * @param methodAnnotationName
@@ -944,6 +1039,20 @@ public final class ScanResult implements Closeable, AutoCloseable {
     /**
      * Get classes that have a method with a parameter that is annotated with an annotation of the named type.
      *
+     * @param methodParameterAnnotation
+     *            the method parameter annotation.
+     * @return A list of classes that have a method with a parameter annotated with the named annotation type, or
+     *         the empty list if none.
+     */
+    public ClassInfoList getClassesWithMethodParameterAnnotation(
+            final Class<? extends Annotation> methodParameterAnnotation) {
+        Assert.isAnnotation(methodParameterAnnotation);
+        return getClassesWithMethodParameterAnnotation(methodParameterAnnotation.getName());
+    }
+
+    /**
+     * Get classes that have a method with a parameter that is annotated with an annotation of the named type.
+     *
      * @param methodParameterAnnotationName
      *            the name of the method parameter annotation.
      * @return A list of classes that have a method with a parameter annotated with the named annotation type, or
@@ -959,6 +1068,18 @@ public final class ScanResult implements Closeable, AutoCloseable {
         }
         final ClassInfo classInfo = classNameToClassInfo.get(methodParameterAnnotationName);
         return classInfo == null ? ClassInfoList.EMPTY_LIST : classInfo.getClassesWithMethodParameterAnnotation();
+    }
+
+    /**
+     * Get classes that have a field with an annotation of the named type.
+     *
+     * @param fieldAnnotation
+     *            the field annotation.
+     * @return A list of classes that have a field with an annotation of the named type, or the empty list if none.
+     */
+    public ClassInfoList getClassesWithFieldAnnotation(final Class<? extends Annotation> fieldAnnotation) {
+        Assert.isAnnotation(fieldAnnotation);
+        return getClassesWithFieldAnnotation(fieldAnnotation.getName());
     }
 
     /**
@@ -1000,8 +1121,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
-     * Get all interfaces implemented by the named class or by one of its superclasses, if this is a standard class,
-     * or the superinterfaces extended by this interface, if this is an interface.
+     * Get all interfaces implemented by the named class or by one of its superclasses, if the named class is a
+     * standard class, or the superinterfaces extended by this interface, if it is an interface.
      *
      * @param className
      *            The class name.
@@ -1017,6 +1138,32 @@ public final class ScanResult implements Closeable, AutoCloseable {
         }
         final ClassInfo classInfo = classNameToClassInfo.get(className);
         return classInfo == null ? ClassInfoList.EMPTY_LIST : classInfo.getInterfaces();
+    }
+
+    /**
+     * Get all interfaces implemented by the class or by one of its superclasses, if the given class is a standard
+     * class, or the superinterfaces extended by this interface, if it is an interface.
+     *
+     * @param classRef
+     *            The class.
+     * @return A list of interfaces implemented by the given class (or superinterfaces extended by the given
+     *         interface), or the empty list if none.
+     */
+    public ClassInfoList getInterfaces(final Class<?> classRef) {
+        return getInterfaces(classRef.getName());
+    }
+
+    /**
+     * Get all classes that implement (or have superclasses that implement) the interface (or one of its
+     * subinterfaces).
+     *
+     * @param interfaceClass
+     *            The interface class.
+     * @return A list of all classes that implement the interface, or the empty list if none.
+     */
+    public ClassInfoList getClassesImplementing(final Class<?> interfaceClass) {
+        Assert.isInterface(interfaceClass);
+        return getClassesImplementing(interfaceClass.getName());
     }
 
     /**
@@ -1075,6 +1222,55 @@ public final class ScanResult implements Closeable, AutoCloseable {
     }
 
     /**
+     * Get classes with the class annotation or meta-annotation.
+     *
+     * @param annotation
+     *            The class annotation or meta-annotation.
+     * @return A list of all non-annotation classes that were found with the class annotation during the scan, or
+     *         the empty list if none.
+     */
+    public ClassInfoList getClassesWithAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getClassesWithAnnotation(annotation.getName());
+    }
+
+    /**
+     * Get classes with all of the specified class annotations or meta-annotation.
+     *
+     * @param annotations
+     *            The class annotations or meta-annotations.
+     * @return A list of all non-annotation classes that were found with any of the class annotations during the
+     *         scan, or the empty list if none.
+     */
+    @SuppressWarnings("unchecked")
+    public ClassInfoList getClassesWithAllAnnotations(final Class<? extends Annotation>... annotations) {
+        final List<String> annotationNames = new ArrayList<>();
+        for (final Class<?> cls : annotations) {
+            Assert.isAnnotation(cls);
+            annotationNames.add(cls.getName());
+        }
+        return getClassesWithAllAnnotations(annotationNames.toArray(new String[0]));
+    }
+
+    /**
+     * Get classes with any of the specified class annotations or meta-annotation.
+     *
+     * @param annotations
+     *            The class annotations or meta-annotations.
+     * @return A list of all non-annotation classes that were found with any of the class annotations during the
+     *         scan, or the empty list if none.
+     */
+    @SuppressWarnings("unchecked")
+    public ClassInfoList getClassesWithAnyAnnotation(final Class<? extends Annotation>... annotations) {
+        final List<String> annotationNames = new ArrayList<>();
+        for (final Class<?> cls : annotations) {
+            Assert.isAnnotation(cls);
+            annotationNames.add(cls.getName());
+        }
+        return getClassesWithAnyAnnotation(annotationNames.toArray(new String[0]));
+    }
+
+    /**
      * Get classes with the named class annotation or meta-annotation.
      *
      * @param annotationName
@@ -1092,6 +1288,50 @@ public final class ScanResult implements Closeable, AutoCloseable {
         }
         final ClassInfo classInfo = classNameToClassInfo.get(annotationName);
         return classInfo == null ? ClassInfoList.EMPTY_LIST : classInfo.getClassesWithAnnotation();
+    }
+
+    /**
+     * Get classes with all of the named class annotations or meta-annotation.
+     *
+     * @param annotationNames
+     *            The name of the class annotations or meta-annotations.
+     * @return A list of all non-annotation classes that were found with all of the named class annotations during
+     *         the scan, or the empty list if none.
+     */
+    public ClassInfoList getClassesWithAllAnnotations(final String... annotationNames) {
+        ClassInfoList foundClassInfo = null;
+        for (final String annotationName : annotationNames) {
+            final ClassInfoList classInfoList = getClassesWithAnnotation(annotationName);
+            if (foundClassInfo == null) {
+                foundClassInfo = classInfoList;
+            } else {
+                foundClassInfo = foundClassInfo.intersect(classInfoList);
+            }
+        }
+        CollectionUtils.sortIfNotEmpty(foundClassInfo);
+        return foundClassInfo == null ? ClassInfoList.EMPTY_LIST : foundClassInfo;
+    }
+
+    /**
+     * Get classes with any of the named class annotations or meta-annotation.
+     *
+     * @param annotationNames
+     *            The name of the class annotations or meta-annotations.
+     * @return A list of all non-annotation classes that were found with any of the named class annotations during
+     *         the scan, or the empty list if none.
+     */
+    public ClassInfoList getClassesWithAnyAnnotation(final String... annotationNames) {
+        ClassInfoList foundClassInfo = null;
+        for (final String annotationName : annotationNames) {
+            final ClassInfoList classInfoList = getClassesWithAnnotation(annotationName);
+            if (foundClassInfo == null) {
+                foundClassInfo = classInfoList;
+            } else {
+                foundClassInfo = foundClassInfo.union(classInfoList);
+            }
+        }
+        CollectionUtils.sortIfNotEmpty(foundClassInfo);
+        return foundClassInfo == null ? ClassInfoList.EMPTY_LIST : foundClassInfo;
     }
 
     /**
@@ -1181,7 +1421,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
      * @return the class loader order.
      */
     ClassLoader[] getClassLoaderOrderRespectingParentDelegation() {
-        return classLoaderOrderRespectingParentDelegation;
+        return classpathFinder.getClassLoaderOrderRespectingParentDelegation();
     }
 
     /**
@@ -1220,7 +1460,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
             if (returnNullIfClassNotFound) {
                 return null;
             } else {
-                throw new IllegalArgumentException("Could not load class " + className + " : " + e);
+                throw new IllegalArgumentException("Could not load class " + className + " : " + e, e);
             }
         }
     }
@@ -1297,6 +1537,7 @@ public final class ScanResult implements Closeable, AutoCloseable {
      *            The JSON string for the serialized {@link ScanResult}.
      * @return The deserialized {@link ScanResult}.
      */
+    @SuppressWarnings("null")
     public static ScanResult fromJSON(final String json) {
         final Matcher matcher = Pattern.compile("\\{[\\n\\r ]*\"format\"[ ]?:[ ]?\"([^\"]+)\"").matcher(json);
         if (!matcher.find()) {
@@ -1312,13 +1553,16 @@ public final class ScanResult implements Closeable, AutoCloseable {
         // Deserialize the JSON
         final SerializationFormat deserialized = JSONDeserializer.deserializeObject(SerializationFormat.class,
                 json);
-        if (!deserialized.format.equals(CURRENT_SERIALIZATION_FORMAT)) {
-            // Probably the deserialization failed before now anyway, if fields have changed, etc.
+        if (deserialized == null || !deserialized.format.equals(CURRENT_SERIALIZATION_FORMAT)) {
+            // Probably the deserialization failed before now anyway, if fields have
+            // changed, etc.
             throw new IllegalArgumentException("JSON was serialized by newer version of ClassGraph");
         }
 
-        // Perform a new "scan" with performScan set to false, which resolves all the ClasspathElement objects
-        // and scans classpath element paths (needed for classloading), but does not scan the actual classfiles
+        // Perform a new "scan" with performScan set to false, which resolves all the
+        // ClasspathElement objects
+        // and scans classpath element paths (needed for classloading), but does not
+        // scan the actual classfiles
         final ClassGraph classGraph = new ClassGraph();
         classGraph.scanSpec = deserialized.scanSpec;
         final ScanResult scanResult;
@@ -1328,7 +1572,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
         }
         scanResult.rawClasspathEltOrderStrs = deserialized.classpath;
 
-        // Set the fields related to ClassInfo in the new ScanResult, based on the deserialized JSON 
+        // Set the fields related to ClassInfo in the new ScanResult, based on the
+        // deserialized JSON
         scanResult.scanSpec = deserialized.scanSpec;
         scanResult.classNameToClassInfo = new HashMap<>();
         if (deserialized.classInfo != null) {
@@ -1350,8 +1595,8 @@ public final class ScanResult implements Closeable, AutoCloseable {
             }
         }
 
-        // Index Resource and ClassInfo objects 
-        scanResult.indexResourcesAndClassInfo();
+        // Index Resource and ClassInfo objects
+        scanResult.indexResourcesAndClassInfo(/* log = */ null);
 
         scanResult.isObtainedFromDeserialization = true;
         return scanResult;
@@ -1429,10 +1674,12 @@ public final class ScanResult implements Closeable, AutoCloseable {
             }
             classGraphClassLoader = null;
             if (classNameToClassInfo != null) {
-                // Don't clear classNameToClassInfo, since it may be used by ClassGraphClassLoader (#399).
-                // Just rely on the garbage collector to collect these once the ScanResult goes out of scope.
-                //                classNameToClassInfo.clear();
-                //                classNameToClassInfo = null;
+                // Don't clear classNameToClassInfo, since it may be used by
+                // ClassGraphClassLoader (#399).
+                // Just rely on the garbage collector to collect these once the ScanResult goes
+                // out of scope.
+                // classNameToClassInfo.clear();
+                // classNameToClassInfo = null;
             }
             if (packageNameToPackageInfo != null) {
                 packageNameToPackageInfo.clear();
@@ -1446,19 +1693,31 @@ public final class ScanResult implements Closeable, AutoCloseable {
                 fileToLastModified.clear();
                 fileToLastModified = null;
             }
-            // nestedJarHandler should be closed last, since it needs to have all MappedByteBuffer refs
-            // dropped before it tries to delete any temporary files that were written to disk
+            // nestedJarHandler should be closed last, since it needs to have all
+            // MappedByteBuffer refs
+            // dropped before it tries to delete any temporary files that were written to
+            // disk
             if (nestedJarHandler != null) {
                 nestedJarHandler.close(topLevelLog);
                 nestedJarHandler = null;
             }
             classGraphClassLoader = null;
-            classLoaderOrderRespectingParentDelegation = null;
-            // Flush log on exit, in case additional log entries were generated after scan() completed
+            classpathFinder = null;
+            reflectionUtils = null;
+            // Flush log on exit, in case additional log entries were generated after scan()
+            // completed
             if (topLevelLog != null) {
                 topLevelLog.flush();
             }
         }
+    }
+
+    /**
+     * Returns whether this ScanResult has been closed yet or not.
+     * @return {@code true} if this ScanResult has been closed
+     */
+    public boolean isClosed() {
+        return closed.get();
     }
 
     /**

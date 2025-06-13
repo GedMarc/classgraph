@@ -28,26 +28,27 @@
  */
 package nonapi.io.github.classgraph.classpath;
 
+import java.lang.reflect.Constructor;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
 import java.lang.reflect.Proxy;
-import java.security.AccessController;
-import java.security.PrivilegedAction;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.Callable;
 
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.utils.LogNode;
 import nonapi.io.github.classgraph.utils.VersionFinder;
 
 /** A class to find the unique ordered classpath elements. */
 class CallStackReader {
-    private static Class<?>[] callStack;
+    ReflectionUtils reflectionUtils;
 
     /**
      * Constructor.
      */
-    private CallStackReader() {
-        // Cannot be constructed
+    public CallStackReader(final ReflectionUtils reflectionUtils) {
+        this.reflectionUtils = reflectionUtils;
     }
 
     /**
@@ -75,7 +76,7 @@ class CallStackReader {
                     .getMethod("getDeclaringClass");
             stackWalkerClass.getMethod("forEach", consumerClass).invoke(stackWalkerInstance, //
                     // InvocationHandler proxy for Consumer<StackFrame>
-                    Proxy.newProxyInstance(consumerClass.getClassLoader(), new Class[] { consumerClass },
+                    Proxy.newProxyInstance(consumerClass.getClassLoader(), new Class<?>[] { consumerClass },
                             new InvocationHandler() {
                                 @Override
                                 public Object invoke(final Object proxy, final Method method, final Object[] args)
@@ -96,24 +97,7 @@ class CallStackReader {
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Using a SecurityManager gets around the fact that Oracle removed sun.reflect.Reflection.getCallerClass, see:
-     * 
-     * https://www.infoq.com/news/2013/07/Oracle-Removes-getCallerClass
-     *
-     * http://www.javaworld.com/article/2077344/core-java/find-a-way-out-of-the-classloader-maze.html
-     */
-    private static final class CallerResolver extends SecurityManager {
-        /* (non-Javadoc)
-         * @see java.lang.SecurityManager#getClassContext()
-         */
-        @Override
-        protected Class<?>[] getClassContext() {
-            return super.getClassContext();
-        }
-    }
-
-    /**
-     * Get the call stack via the SecurityManager API.
+     * Get the call stack via the SecurityManager.getClassContext() native method.
      *
      * @param log
      *            the log
@@ -121,12 +105,27 @@ class CallStackReader {
      */
     private static Class<?>[] getCallStackViaSecurityManager(final LogNode log) {
         try {
-            return new CallerResolver().getClassContext();
-        } catch (final SecurityException e) {
+            // Call method via reflection, since SecurityManager is deprecated in JDK 17.
+            final Class<?> securityManagerClass = Class.forName("java.lang.SecurityManager");
+            Object securityManager = null;
+            for (final Constructor<?> constructor : securityManagerClass.getDeclaredConstructors()) {
+                if (constructor.getParameterTypes().length == 0) {
+                    securityManager = constructor.newInstance();
+                    break;
+                }
+            }
+            if (securityManager != null) {
+                final Method getClassContext = securityManager.getClass().getDeclaredMethod("getClassContext");
+                getClassContext.setAccessible(true);
+                return (Class<?>[]) getClassContext.invoke(securityManager);
+            } else {
+                return null;
+            }
+        } catch (final Throwable t) {
             // Creating a SecurityManager can fail if the current SecurityManager does not allow
             // RuntimePermission("createSecurityManager")
             if (log != null) {
-                log.log("Exception while trying to obtain call stack via SecurityManager", e);
+                log.log("Exception while trying to obtain call stack via SecurityManager", t);
             }
             return null;
         }
@@ -141,67 +140,90 @@ class CallStackReader {
      *            the log
      * @return The classes in the call stack.
      */
-    static Class<?>[] getClassContext(final LogNode log) {
-        if (callStack == null) {
-            // For JRE 9+, use StackWalker to get call stack.
-            // N.B. need to work around StackWalker bug fixed in JDK 13, and backported to 12.0.2 and 11.0.4
-            // (probably introduced in JDK 9, when StackWalker was introduced):
+    Class<?>[] getClassContext(final LogNode log) {
+        Class<?>[] callStack = null;
+
+        // For JRE 9+, use StackWalker to get call stack.
+        if (VersionFinder.JAVA_MAJOR_VERSION == 9 //
+                || VersionFinder.JAVA_MAJOR_VERSION == 10 //
+                || (VersionFinder.JAVA_MAJOR_VERSION == 11 //
+                        && VersionFinder.JAVA_MINOR_VERSION == 0
+                        && (VersionFinder.JAVA_SUB_VERSION < 4
+                                || (VersionFinder.JAVA_SUB_VERSION == 4 && VersionFinder.JAVA_IS_EA_VERSION)))
+                || (VersionFinder.JAVA_MAJOR_VERSION == 12 && VersionFinder.JAVA_MINOR_VERSION == 0
+                        && (VersionFinder.JAVA_SUB_VERSION < 2
+                                || (VersionFinder.JAVA_SUB_VERSION == 2 && VersionFinder.JAVA_IS_EA_VERSION)))) {
+            // Don't trigger the StackWalker bug that crashed the JVM, which was fixed in JDK 13,
+            // and backported to 12.0.2 and 11.0.4 (probably introduced in JDK 9, when StackWalker
+            // was introduced):
             // https://github.com/classgraph/classgraph/issues/341
             // https://bugs.openjdk.java.net/browse/JDK-8210457
-            if ((VersionFinder.JAVA_MAJOR_VERSION == 11
-                    && (VersionFinder.JAVA_MINOR_VERSION >= 1 || VersionFinder.JAVA_SUB_VERSION >= 4)
-                    && !VersionFinder.JAVA_IS_EA_VERSION)
-                    || (VersionFinder.JAVA_MAJOR_VERSION == 12
-                            && (VersionFinder.JAVA_MINOR_VERSION >= 1 || VersionFinder.JAVA_SUB_VERSION >= 2)
-                            && !VersionFinder.JAVA_IS_EA_VERSION)
-                    || (VersionFinder.JAVA_MAJOR_VERSION == 13 && !VersionFinder.JAVA_IS_EA_VERSION)
-                    || VersionFinder.JAVA_MAJOR_VERSION > 13) {
-                // Invoke with doPrivileged -- see:
-                // http://mail.openjdk.java.net/pipermail/jigsaw-dev/2018-October/013974.html
-                callStack = AccessController.doPrivileged(new PrivilegedAction<Class<?>[]>() {
+            // -- fall through
+        } else {
+            // Get the stack via StackWalker.
+            // Invoke with doPrivileged -- see:
+            // http://mail.openjdk.java.net/pipermail/jigsaw-dev/2018-October/013974.html
+            try {
+                callStack = reflectionUtils.doPrivileged(new Callable<Class<?>[]>() {
                     @Override
-                    public Class<?>[] run() {
+                    public Class<?>[] call() throws Exception {
                         return getCallStackViaStackWalker();
                     }
                 });
+            } catch (final Throwable e) {
+                // Fall through
             }
+        }
 
-            // For JRE 7 and 8, use SecurityManager to get call stack
-            if (callStack == null || callStack.length == 0) {
-                callStack = AccessController.doPrivileged(new PrivilegedAction<Class<?>[]>() {
+        // For JRE 7 and 8, use SecurityManager to get call stack (don't use this method on JDK 9+,
+        // because it will result in a reflective illegal access warning, see #663)
+        if (VersionFinder.JAVA_MAJOR_VERSION < 9 && (callStack == null || callStack.length == 0)) {
+            try {
+                callStack = reflectionUtils.doPrivileged(new Callable<Class<?>[]>() {
                     @Override
-                    public Class<?>[] run() {
+                    public Class<?>[] call() throws Exception {
                         return getCallStackViaSecurityManager(log);
                     }
                 });
-            }
-
-            // As a fallback, use getStackTrace() to try to get the call stack
-            if (callStack == null || callStack.length == 0) {
-                StackTraceElement[] stackTrace = Thread.currentThread().getStackTrace();
-                if (stackTrace == null || stackTrace.length == 0) {
-                    try {
-                        throw new Exception();
-                    } catch (final Exception e) {
-                        stackTrace = e.getStackTrace();
-                    }
-                }
-                final List<Class<?>> stackClassesList = new ArrayList<>();
-                for (final StackTraceElement elt : stackTrace) {
-                    try {
-                        stackClassesList.add(Class.forName(elt.getClassName()));
-                    } catch (final ClassNotFoundException | LinkageError ignored) {
-                        // Ignored
-                    }
-                }
-                if (!stackClassesList.isEmpty()) {
-                    callStack = stackClassesList.toArray(new Class<?>[0]);
-                } else {
-                    // Last-ditch effort -- include just this class in the call stack
-                    callStack = new Class<?>[] { CallStackReader.class };
-                }
+            } catch (final Throwable e) {
+                // Fall through
             }
         }
+
+        // As a fallback, use getStackTrace() to try to get the call stack
+        if (callStack == null || callStack.length == 0) {
+            StackTraceElement[] stackTrace = null;
+            try {
+                stackTrace = Thread.currentThread().getStackTrace();
+            } catch (final SecurityException e) {
+                // Fall through
+            }
+            if (stackTrace == null || stackTrace.length == 0) {
+                try {
+                    // Try getting stacktrace by throwing an exception 
+                    throw new Exception();
+                } catch (final Exception e) {
+                    stackTrace = e.getStackTrace();
+                }
+            }
+            final List<Class<?>> stackClassesList = new ArrayList<>();
+            for (final StackTraceElement elt : stackTrace) {
+                try {
+                    stackClassesList.add(Class.forName(elt.getClassName()));
+                } catch (final ClassNotFoundException | LinkageError ignored) {
+                    // Ignored
+                }
+            }
+            if (!stackClassesList.isEmpty()) {
+                callStack = stackClassesList.toArray(new Class<?>[0]);
+            }
+        }
+
+        // Last-ditch effort -- include just this class in the call stack
+        if (callStack == null || callStack.length == 0) {
+            callStack = new Class<?>[] { CallStackReader.class };
+        }
+
         return callStack;
     }
 }

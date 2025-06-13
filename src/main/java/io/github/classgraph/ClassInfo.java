@@ -29,6 +29,7 @@
 package io.github.classgraph;
 
 import java.io.File;
+import java.lang.annotation.Annotation;
 import java.lang.annotation.Inherited;
 import java.lang.annotation.Repeatable;
 import java.lang.reflect.Modifier;
@@ -49,11 +50,17 @@ import java.util.Map.Entry;
 import java.util.Set;
 
 import io.github.classgraph.Classfile.ClassContainment;
+import io.github.classgraph.Classfile.ClassTypeAnnotationDecorator;
+import io.github.classgraph.FieldInfoList.FieldInfoFilter;
 import nonapi.io.github.classgraph.json.Id;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.types.ParseException;
+import nonapi.io.github.classgraph.types.Parser;
 import nonapi.io.github.classgraph.types.TypeUtils;
 import nonapi.io.github.classgraph.types.TypeUtils.ModifierType;
+import nonapi.io.github.classgraph.utils.Assert;
+import nonapi.io.github.classgraph.utils.LogNode;
 
 /** Holds metadata about a class encountered during a scan. */
 public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>, HasName {
@@ -84,6 +91,12 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
 
     /** The class type signature, parsed. */
     private transient ClassTypeSignature typeSignature;
+
+    /** The synthetic class type descriptor. */
+    private transient ClassTypeSignature typeDescriptor;
+
+    /** The name of the source file this class has been compiled from */
+    private String sourceFile;
 
     /** The fully-qualified defining method name, for anonymous inner classes. */
     private String fullyQualifiedDefiningMethodName;
@@ -131,6 +144,9 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     /** For annotations, the default values of parameters. */
     AnnotationParameterValueList annotationDefaultParamValues;
 
+    /** The type annotation decorators for the {@link ClassTypeSignature} instance. */
+    transient List<ClassTypeAnnotationDecorator> typeAnnotationDecorators;
+
     /**
      * Names of classes referenced by this class in class refs and type signatures in the constant pool of the
      * classfile.
@@ -157,6 +173,17 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * superclasses).
      */
     private transient List<ClassInfo> overrideOrder;
+
+    /**
+     * The override order for a class' methods (base class, followed by superclasses, followed by interfaces).
+     */
+    private transient List<ClassInfo> methodOverrideOrder;
+
+    /** The annotations, once they are loaded */
+    private ClassInfoList annotationsRef;
+
+    /** The annotation infos, once they are loaded */
+    private AnnotationInfoList annotationInfoRef;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -185,6 +212,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @param classfileResource
      *            the classfile resource
      */
+    @SuppressWarnings("null")
     protected ClassInfo(final String name, final int classModifiers, final Resource classfileResource) {
         super();
         this.name = name;
@@ -346,10 +374,40 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
 
         ClassInfo classInfo = classNameToClassInfo.get(className);
         if (classInfo == null) {
-            classNameToClassInfo.put(className, //
-                    classInfo = numArrayDims == 0 //
-                            ? new ClassInfo(baseClassName, /* classModifiers = */ 0, /* classfileResource = */ null)
-                            : new ArrayClassInfo(new ArrayTypeSignature(baseClassName, numArrayDims)));
+            if (numArrayDims == 0) {
+                classInfo = new ClassInfo(baseClassName, /* classModifiers = */ 0, /* classfileResource = */ null);
+            } else {
+                final StringBuilder arrayTypeSigStrBuf = new StringBuilder();
+                for (int i = 0; i < numArrayDims; i++) {
+                    arrayTypeSigStrBuf.append('[');
+                }
+                TypeSignature elementTypeSignature;
+                final char baseTypeChar = BaseTypeSignature.getTypeChar(baseClassName);
+                if (baseTypeChar != '\0') {
+                    // Element type is a base (primitive) type
+                    arrayTypeSigStrBuf.append(baseTypeChar);
+                    elementTypeSignature = new BaseTypeSignature(baseTypeChar);
+                } else {
+                    // Element type is not a base (primitive) type -- create a type signature for element type
+                    final String eltTypeSigStr = "L" + baseClassName.replace('.', '/') + ";";
+                    arrayTypeSigStrBuf.append(eltTypeSigStr);
+                    try {
+                        elementTypeSignature = ClassRefTypeSignature.parse(new Parser(eltTypeSigStr),
+                                // No type variables to resolve for generic types
+                                /* definingClassName = */ null);
+                        if (elementTypeSignature == null) {
+                            throw new IllegalArgumentException(
+                                    "Could not form array base type signature for class " + baseClassName);
+                        }
+                    } catch (final ParseException e) {
+                        throw new IllegalArgumentException(
+                                "Could not form array base type signature for class " + baseClassName);
+                    }
+                }
+                classInfo = new ArrayClassInfo(
+                        new ArrayTypeSignature(elementTypeSignature, numArrayDims, arrayTypeSigStrBuf.toString()));
+            }
+            classNameToClassInfo.put(className, classInfo);
         }
         return classInfo;
     }
@@ -411,6 +469,29 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         if (isRecord) {
             this.isRecord = isRecord;
         }
+    }
+
+    /**
+     * Set source file.
+     *
+     * @param sourceFile
+     *            the source file
+     */
+    void setSourceFile(final String sourceFile) {
+        this.sourceFile = sourceFile;
+    }
+
+    /**
+     * Add {@link ClassTypeAnnotationDecorator} instances.
+     * 
+     * @param classTypeAnnotationDecorators
+     *            {@link ClassTypeAnnotationDecorator} instances.
+     */
+    void addTypeDecorators(final List<ClassTypeAnnotationDecorator> classTypeAnnotationDecorators) {
+        if (typeAnnotationDecorators == null) {
+            typeAnnotationDecorators = new ArrayList<>();
+        }
+        typeAnnotationDecorators.addAll(classTypeAnnotationDecorators);
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -578,8 +659,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
                 for (int i = 0; i < mi.parameterAnnotationInfo.length; i++) {
                     final AnnotationInfo[] paramAnnotationInfoArr = mi.parameterAnnotationInfo[i];
                     if (paramAnnotationInfoArr != null) {
-                        for (int j = 0; j < paramAnnotationInfoArr.length; j++) {
-                            final AnnotationInfo methodParamAnnotationInfo = paramAnnotationInfoArr[j];
+                        for (final AnnotationInfo methodParamAnnotationInfo : paramAnnotationInfoArr) {
                             final ClassInfo annotationClassInfo = getOrCreateClassInfo(
                                     methodParamAnnotationInfo.getName(), classNameToClassInfo);
                             annotationClassInfo.setModifiers(ANNOTATION_CLASS_MODIFIER);
@@ -721,7 +801,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @param scanSpec
      *            the scan spec
      * @param strictAccept
-     *            If true, exclude class if it is is external, rejected, or a system class.
+     *            If true, exclude class if it is external, if external classes are not enabled
      * @param classTypes
      *            the class types
      * @return the filtered classes.
@@ -729,7 +809,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     private static Set<ClassInfo> filterClassInfo(final Collection<ClassInfo> classes, final ScanSpec scanSpec,
             final boolean strictAccept, final ClassType... classTypes) {
         if (classes == null) {
-            return Collections.<ClassInfo> emptySet();
+            return Collections.emptySet();
         }
         boolean includeAllTypes = classTypes.length == 0;
         boolean includeStandardClasses = false;
@@ -770,19 +850,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         final Set<ClassInfo> classInfoSetFiltered = new LinkedHashSet<>(classes.size());
         for (final ClassInfo classInfo : classes) {
             // Check class type against requested type(s)
-            if ((includeAllTypes //
+            final boolean includeType = includeAllTypes //
                     || includeStandardClasses && classInfo.isStandardClass() //
                     || includeImplementedInterfaces && classInfo.isImplementedInterface() //
                     || includeAnnotations && classInfo.isAnnotation() //
                     || includeEnums && classInfo.isEnum() //
-                    || includeRecords && classInfo.isRecord()) //
-                    // Always check reject 
-                    && !scanSpec.classOrPackageIsRejected(classInfo.name) //
-                    // Always return accepted classes, or external classes if enableExternalClasses is true
-                    && (!classInfo.isExternalClass || scanSpec.enableExternalClasses
-                    // Return external (non-accepted) classes if viewing class hierarchy "upwards" 
-                            || !strictAccept)) {
-                // Class passed strict accept criteria
+                    || includeRecords && classInfo.isRecord();
+            // Return external (non-accepted) classes if viewing class hierarchy "upwards" 
+            final boolean acceptClass = !classInfo.isExternalClass || scanSpec.enableExternalClasses
+                    || !strictAccept;
+            // If class is of correct type, and class is accepted, and class/package are not explicitly rejected 
+            if (includeType && acceptClass && !scanSpec.classOrPackageIsRejected(classInfo.name)) {
+                // Class passed accept criteria
                 classInfoSetFiltered.add(classInfo);
             }
         }
@@ -821,11 +900,11 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * directly related.
      *
      * @param relType
-     *            the rel type
+     *            the relationship type
      * @param strictAccept
-     *            the strict accept criterion
+     *            If true, exclude class if it is external, if external classes are not enabled
      * @param classTypes
-     *            the class types
+     *            the class types to accept
      * @return the reachable and directly related classes
      */
     private ReachableAndDirectlyRelatedClasses filterClassInfo(final RelType relType, final boolean strictAccept,
@@ -1030,16 +1109,16 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
-     * Get simple name from fully-qualified class name. Returns everything after the last '.' in the class name, or
-     * the whole string if the class is in the root package. (Note that this is not the same as the result of
-     * {@link Class#getSimpleName()}, which returns "" for anonymous classes.)
+     * Get simple name from fully-qualified class name. Returns everything after the last '.' or the last '$' in the
+     * class name, or the whole string if the class is in the root package. (Note that this is not the same as the
+     * result of {@link Class#getSimpleName()}, which returns "" for anonymous classes.)
      *
      * @param className
      *            the class name
      * @return The simple name of the class.
      */
     static String getSimpleName(final String className) {
-        return className.substring(className.lastIndexOf('.') + 1);
+        return className.substring(Math.max(className.lastIndexOf('.'), className.lastIndexOf('$')) + 1);
     }
 
     /**
@@ -1137,7 +1216,34 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class is a public class.
      */
     public boolean isPublic() {
-        return (modifiers & Modifier.PUBLIC) != 0;
+        return Modifier.isPublic(modifiers);
+    }
+
+    /**
+     * Checks if the class is private.
+     *
+     * @return true if this class is a private class.
+     */
+    public boolean isPrivate() {
+        return Modifier.isPrivate(modifiers);
+    }
+
+    /**
+     * Checks if the class is protected.
+     *
+     * @return true if this class is a protected class.
+     */
+    public boolean isProtected() {
+        return Modifier.isProtected(modifiers);
+    }
+
+    /**
+     * Checks if the class has default (package) visibility.
+     * 
+     * @return true if this class is only visible within its package.
+     */
+    public boolean isPackageVisible() {
+        return !isPublic() && !isPrivate() && !isProtected();
     }
 
     /**
@@ -1146,7 +1252,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class is an abstract class.
      */
     public boolean isAbstract() {
-        return (modifiers & 0x400) != 0;
+        return Modifier.isAbstract(modifiers);
     }
 
     /**
@@ -1164,7 +1270,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class is a final class.
      */
     public boolean isFinal() {
-        return (modifiers & Modifier.FINAL) != 0;
+        return Modifier.isFinal(modifiers);
     }
 
     /**
@@ -1243,6 +1349,17 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
+     * Checks if this class extends the superclass.
+     *
+     * @param superclass
+     *            A superclass.
+     * @return true if this class extends the superclass.
+     */
+    public boolean extendsSuperclass(final Class<?> superclass) {
+        return extendsSuperclass(superclass.getName());
+    }
+
+    /**
      * Checks if this class extends the named superclass.
      *
      * @param superclassName
@@ -1250,7 +1367,8 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class extends the named superclass.
      */
     public boolean extendsSuperclass(final String superclassName) {
-        return getSuperclasses().containsName(superclassName);
+        return (superclassName.equals("java.lang.Object") && isStandardClass())
+                || getSuperclasses().containsName(superclassName);
     }
 
     /**
@@ -1299,6 +1417,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
+     * Checks whether this class implements the interface.
+     *
+     * @param interfaceClazz
+     *            An interface.
+     * @return true if this class implements the interface.
+     */
+    public boolean implementsInterface(final Class<?> interfaceClazz) {
+        Assert.isInterface(interfaceClazz);
+        return implementsInterface(interfaceClazz.getName());
+    }
+
+    /**
      * Checks whether this class implements the named interface.
      *
      * @param interfaceName
@@ -1307,6 +1437,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      */
     public boolean implementsInterface(final String interfaceName) {
         return getInterfaces().containsName(interfaceName);
+    }
+
+    /**
+     * Checks whether this class has the annotation.
+     *
+     * @param annotation
+     *            An annotation.
+     * @return true if this class has the annotation.
+     */
+    public boolean hasAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return hasAnnotation(annotation.getName());
     }
 
     /**
@@ -1339,12 +1481,24 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class or one of its superclasses declares a field of the given name.
      */
     public boolean hasField(final String fieldName) {
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getFieldOverrideOrder()) {
             if (ci.hasDeclaredField(fieldName)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Checks whether this class declares a field with the annotation.
+     *
+     * @param annotation
+     *            A field annotation.
+     * @return true if this class declares a field with the annotation.
+     */
+    public boolean hasDeclaredFieldAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return hasDeclaredFieldAnnotation(annotation.getName());
     }
 
     /**
@@ -1364,6 +1518,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
+     * Checks whether this class or one of its superclasses declares a field with the annotation.
+     *
+     * @param fieldAnnotation
+     *            A field annotation.
+     * @return true if this class or one of its superclasses declares a field with the annotation.
+     */
+    public boolean hasFieldAnnotation(final Class<? extends Annotation> fieldAnnotation) {
+        Assert.isAnnotation(fieldAnnotation);
+        return hasFieldAnnotation(fieldAnnotation.getName());
+    }
+
+    /**
      * Checks whether this class or one of its superclasses declares a field with the named annotation.
      *
      * @param fieldAnnotationName
@@ -1371,7 +1537,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class or one of its superclasses declares a field with the named annotation.
      */
     public boolean hasFieldAnnotation(final String fieldAnnotationName) {
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getFieldOverrideOrder()) {
             if (ci.hasDeclaredFieldAnnotation(fieldAnnotationName)) {
                 return true;
             }
@@ -1380,11 +1546,11 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
-     * Checks whether this class declares a field of the given name.
+     * Checks whether this class declares a method of the given name.
      *
      * @param methodName
      *            The name of a method.
-     * @return true if this class declares a field of the given name.
+     * @return true if this class declares a method of the given name.
      */
     public boolean hasDeclaredMethod(final String methodName) {
         return getDeclaredMethodInfo().containsName(methodName);
@@ -1398,12 +1564,24 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class or one of its superclasses or interfaces declares a method of the given name.
      */
     public boolean hasMethod(final String methodName) {
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getMethodOverrideOrder()) {
             if (ci.hasDeclaredMethod(methodName)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Checks whether this class declares a method with the annotation.
+     *
+     * @param methodAnnotation
+     *            A method annotation.
+     * @return true if this class declares a method with the annotation.
+     */
+    public boolean hasDeclaredMethodAnnotation(final Class<? extends Annotation> methodAnnotation) {
+        Assert.isAnnotation(methodAnnotation);
+        return hasDeclaredMethodAnnotation(methodAnnotation.getName());
     }
 
     /**
@@ -1423,6 +1601,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
+     * Checks whether this class or one of its superclasses or interfaces declares a method with the annotation.
+     *
+     * @param methodAnnotation
+     *            A method annotation.
+     * @return true if this class or one of its superclasses or interfaces declares a method with the annotation.
+     */
+    public boolean hasMethodAnnotation(final Class<? extends Annotation> methodAnnotation) {
+        Assert.isAnnotation(methodAnnotation);
+        return hasMethodAnnotation(methodAnnotation.getName());
+    }
+
+    /**
      * Checks whether this class or one of its superclasses or interfaces declares a method with the named
      * annotation.
      *
@@ -1432,12 +1622,25 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *         annotation.
      */
     public boolean hasMethodAnnotation(final String methodAnnotationName) {
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getMethodOverrideOrder()) {
             if (ci.hasDeclaredMethodAnnotation(methodAnnotationName)) {
                 return true;
             }
         }
         return false;
+    }
+
+    /**
+     * Checks whether this class declares a method with the annotation.
+     *
+     * @param methodParameterAnnotation
+     *            A method annotation.
+     * @return true if this class declares a method with the annotation.
+     */
+    public boolean hasDeclaredMethodParameterAnnotation(
+            final Class<? extends Annotation> methodParameterAnnotation) {
+        Assert.isAnnotation(methodParameterAnnotation);
+        return hasDeclaredMethodParameterAnnotation(methodParameterAnnotation.getName());
     }
 
     /**
@@ -1457,6 +1660,18 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
+     * Checks whether this class or one of its superclasses or interfaces has a method with the annotation.
+     *
+     * @param methodParameterAnnotation
+     *            A method annotation.
+     * @return true if this class or one of its superclasses or interfaces has a method with the annotation.
+     */
+    public boolean hasMethodParameterAnnotation(final Class<? extends Annotation> methodParameterAnnotation) {
+        Assert.isAnnotation(methodParameterAnnotation);
+        return hasMethodParameterAnnotation(methodParameterAnnotation.getName());
+    }
+
+    /**
      * Checks whether this class or one of its superclasses or interfaces has a method with the named annotation.
      *
      * @param methodParameterAnnotationName
@@ -1464,7 +1679,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return true if this class or one of its superclasses or interfaces has a method with the named annotation.
      */
     public boolean hasMethodParameterAnnotation(final String methodParameterAnnotationName) {
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getMethodOverrideOrder()) {
             if (ci.hasDeclaredMethodParameterAnnotation(methodParameterAnnotationName)) {
                 return true;
             }
@@ -1475,7 +1690,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Recurse to interfaces and superclasses to get the order that fields and methods are overridden in.
+     * Recurse to interfaces and superclasses to get the order that fields are overridden in.
      *
      * @param visited
      *            visited
@@ -1483,30 +1698,104 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *            the override order
      * @return the override order
      */
-    private List<ClassInfo> getOverrideOrder(final Set<ClassInfo> visited, final List<ClassInfo> overrideOrderOut) {
+    private List<ClassInfo> getFieldOverrideOrder(final Set<ClassInfo> visited,
+            final List<ClassInfo> overrideOrderOut) {
         if (visited.add(this)) {
             overrideOrderOut.add(this);
             for (final ClassInfo iface : getInterfaces()) {
-                iface.getOverrideOrder(visited, overrideOrderOut);
+                iface.getFieldOverrideOrder(visited, overrideOrderOut);
             }
             final ClassInfo superclass = getSuperclass();
             if (superclass != null) {
-                superclass.getOverrideOrder(visited, overrideOrderOut);
+                superclass.getFieldOverrideOrder(visited, overrideOrderOut);
             }
         }
         return overrideOrderOut;
     }
 
     /**
-     * Get the order that fields and methods are overridden in (base class first).
+     * Get the order that fields are overridden in (base class first).
      *
      * @return the override order
      */
-    private List<ClassInfo> getOverrideOrder() {
+    private List<ClassInfo> getFieldOverrideOrder() {
         if (overrideOrder == null) {
-            overrideOrder = getOverrideOrder(new HashSet<ClassInfo>(), new ArrayList<ClassInfo>());
+            overrideOrder = getFieldOverrideOrder(new HashSet<ClassInfo>(), new ArrayList<ClassInfo>());
         }
         return overrideOrder;
+    }
+
+    /**
+     * Recurse to collect classes and interfaces in the order of overridden methods, in descending priority.
+     * <p>
+     * First collects all direct super classes, as their methods always have a higher priority than any method
+     * declared by an interface. Iterates over interfaces and inserts those extending already found interfaces
+     * before them in the output. The order of unrelated interfaces is unspecified.
+     * <p>
+     * See Java Language Specification 8.4.8 for details.
+     *
+     * @param visited
+     *            non-null set of already visited ClassInfos
+     * @param overrideOrderOut
+     *            non-null outgoing list of ClassInfos in descending override order.
+     * @return the overrideOrderOut instance
+     */
+    private List<ClassInfo> getMethodOverrideOrder(final Set<ClassInfo> visited,
+            final List<ClassInfo> overrideOrderOut) {
+        if (!visited.add(this)) {
+            return overrideOrderOut;
+        }
+        //collect concrete super classes first, simply add to overrideOrder
+        if (!isInterfaceOrAnnotation()) {
+            overrideOrderOut.add(this);
+            //iterate over direct super classes first, they have the highest priority regarding method overrides
+            final ClassInfo superclass = getSuperclass();
+            if (superclass != null) {
+                superclass.getMethodOverrideOrder(visited, overrideOrderOut);
+            }
+            for (final ClassInfo iface : getInterfaces()) {
+                iface.getMethodOverrideOrder(visited, overrideOrderOut);
+            }
+            return overrideOrderOut;
+        }
+        // overrideOrderOut already contains all concrete classes now.
+        // This is an interface. If one of the extended interfaces is already in the output, then this needs to be
+        // added before it.
+        // Otherwise, this is unrelated to all collected ClassInfo so far and can simply be added to the result.
+        // The compiler should've prevented inheriting unrelated interfaces with methods having the same signature.
+        // Can still happen thanks to dynamically linking a different interface during runtime, for which the
+        // returned order is undefined.
+        final ClassInfoList interfaces = getInterfaces();
+        int minIndex = Integer.MAX_VALUE;
+        for (final ClassInfo iface : interfaces) {
+            if (!visited.contains(iface)) {
+                continue;
+            }
+            final int currIdx = overrideOrderOut.indexOf(iface);
+            minIndex = currIdx >= 0 && currIdx < minIndex ? currIdx : minIndex;
+        }
+        if (minIndex == Integer.MAX_VALUE) {
+            overrideOrderOut.add(this);
+        } else {
+            overrideOrderOut.add(minIndex, this);
+        }
+        // Add interfaces to end of override order
+        for (final ClassInfo iface : interfaces) {
+            iface.getMethodOverrideOrder(visited, overrideOrderOut);
+        }
+        return overrideOrderOut;
+    }
+
+    /**
+     * Get the order that methods are overridden in.
+     *
+     * @return the override order
+     */
+    private List<ClassInfo> getMethodOverrideOrder() {
+        if (methodOverrideOrder == null) {
+            methodOverrideOrder = getMethodOverrideOrder(new HashSet<ClassInfo>(), new ArrayList<ClassInfo>());
+        }
+        return methodOverrideOrder;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -1515,13 +1804,16 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     /**
      * Get the subclasses of this class, sorted in order of name. Call {@link ClassInfoList#directOnly()} to get
      * direct subclasses.
+     * 
+     * If this class represents {@link Object}, then returns only standard classes, not interfaces, since interfaces
+     * don't extend {@link Object}.
      *
      * @return the list of subclasses of this class, or the empty list if none.
      */
     public ClassInfoList getSubclasses() {
         if (getName().equals("java.lang.Object")) {
             // Make an exception for querying all subclasses of java.lang.Object
-            return scanResult.getAllClasses();
+            return scanResult.getAllStandardClasses();
         } else {
             return new ClassInfoList(
                     this.filterClassInfo(RelType.SUBCLASSES, /* strictAccept = */ !isExternalClass),
@@ -1530,9 +1822,11 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
-     * Get all superclasses of this class, in ascending order in the class hierarchy. Does not include
-     * superinterfaces, if this is an interface (use {@link #getInterfaces()} to get superinterfaces of an
-     * interface.}
+     * Get all superclasses of this class, in ascending order in the class hierarchy, not including {@link Object}
+     * for simplicity, since that is the superclass of all classes.
+     * 
+     * Also does not include superinterfaces, if this is an interface (use {@link #getInterfaces()} to get
+     * superinterfaces of an interface.}
      *
      * @return the list of all superclasses of this class, or the empty list if none.
      */
@@ -1619,8 +1913,9 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
                     .filterClassInfo(RelType.IMPLEMENTED_INTERFACES, /* strictAccept = */ false).reachableClasses;
             allInterfaces.addAll(superclassImplementedInterfaces);
         }
+        // Can't sort interfaces by name, since their order is significant in the definition of inheritance
         return new ClassInfoList(allInterfaces, implementedInterfaces.directlyRelatedClasses,
-                /* sortByName = */ true);
+                /* sortByName = */ false);
     }
 
     /**
@@ -1630,9 +1925,6 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *         interface, otherwise returns the empty list.
      */
     public ClassInfoList getClassesImplementing() {
-        if (!isInterface()) {
-            throw new IllegalArgumentException("Class is not an interface: " + getName());
-        }
         // Subclasses of implementing classes also implement the interface
         final ReachableAndDirectlyRelatedClasses implementingClasses = this
                 .filterClassInfo(RelType.CLASSES_IMPLEMENTING, /* strictAccept = */ !isExternalClass);
@@ -1663,38 +1955,45 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      * @return the list of annotations and meta-annotations on this class.
      */
     public ClassInfoList getAnnotations() {
-        if (!scanResult.scanSpec.enableAnnotationInfo) {
-            throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
-        }
+        synchronized (this) {
+            if (annotationsRef != null) {
+                return annotationsRef;
+            }
 
-        // Get all annotations on this class
-        final ReachableAndDirectlyRelatedClasses annotationClasses = this.filterClassInfo(RelType.CLASS_ANNOTATIONS,
-                /* strictAccept = */ false);
-        // Check for any @Inherited annotations on superclasses
-        Set<ClassInfo> inheritedSuperclassAnnotations = null;
-        for (final ClassInfo superclass : getSuperclasses()) {
-            for (final ClassInfo superclassAnnotation : superclass.filterClassInfo(RelType.CLASS_ANNOTATIONS,
-                    /* strictAccept = */ false).reachableClasses) {
-                // Check if any of the meta-annotations on this annotation are @Inherited,
-                // which causes an annotation to annotate a class and all of its subclasses.
-                if (superclassAnnotation != null && superclassAnnotation.isInherited) {
-                    // superclassAnnotation has an @Inherited meta-annotation
-                    if (inheritedSuperclassAnnotations == null) {
-                        inheritedSuperclassAnnotations = new LinkedHashSet<>();
+            if (!scanResult.scanSpec.enableAnnotationInfo) {
+                throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
+            }
+
+            // Get all annotations on this class
+            final ReachableAndDirectlyRelatedClasses annotationClasses = this
+                    .filterClassInfo(RelType.CLASS_ANNOTATIONS, /* strictAccept = */ false);
+            // Check for any @Inherited annotations on superclasses
+            Set<ClassInfo> inheritedSuperclassAnnotations = null;
+            for (final ClassInfo superclass : getSuperclasses()) {
+                for (final ClassInfo superclassAnnotation : superclass.filterClassInfo(RelType.CLASS_ANNOTATIONS,
+                        /* strictAccept = */ false).reachableClasses) {
+                    // Check if any of the meta-annotations on this annotation are @Inherited,
+                    // which causes an annotation to annotate a class and all of its subclasses.
+                    if (superclassAnnotation != null && superclassAnnotation.isInherited) {
+                        // superclassAnnotation has an @Inherited meta-annotation
+                        if (inheritedSuperclassAnnotations == null) {
+                            inheritedSuperclassAnnotations = new LinkedHashSet<>();
+                        }
+                        inheritedSuperclassAnnotations.add(superclassAnnotation);
                     }
-                    inheritedSuperclassAnnotations.add(superclassAnnotation);
                 }
             }
-        }
 
-        if (inheritedSuperclassAnnotations == null) {
-            // No inherited superclass annotations
-            return new ClassInfoList(annotationClasses, /* sortByName = */ true);
-        } else {
-            // Merge inherited superclass annotations and annotations on this class
-            inheritedSuperclassAnnotations.addAll(annotationClasses.reachableClasses);
-            return new ClassInfoList(inheritedSuperclassAnnotations, annotationClasses.directlyRelatedClasses,
-                    /* sortByName = */ true);
+            if (inheritedSuperclassAnnotations == null) {
+                // No inherited superclass annotations
+                annotationsRef = new ClassInfoList(annotationClasses, /* sortByName = */ true);
+            } else {
+                // Merge inherited superclass annotations and annotations on this class
+                inheritedSuperclassAnnotations.addAll(annotationClasses.reachableClasses);
+                annotationsRef = new ClassInfoList(inheritedSuperclassAnnotations,
+                        annotationClasses.directlyRelatedClasses, /* sortByName = */ true);
+            }
+            return annotationsRef;
         }
     }
 
@@ -1778,25 +2077,56 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *         none.
      */
     public AnnotationInfoList getAnnotationInfo() {
-        if (!scanResult.scanSpec.enableAnnotationInfo) {
-            throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
+        synchronized (this) {
+            if (annotationInfoRef != null) {
+                return annotationInfoRef;
+            }
+
+            if (!scanResult.scanSpec.enableAnnotationInfo) {
+                throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
+            }
+
+            annotationInfoRef = AnnotationInfoList.getIndirectAnnotations(annotationInfo, this);
+            return annotationInfoRef;
         }
-        return AnnotationInfoList.getIndirectAnnotations(annotationInfo, this);
     }
 
     /**
-     * Get a the named non-{@link Repeatable} annotation on this class, or null if the class does not have the named
-     * annotation. (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable} annotations.)
+     * Get a the non-{@link Repeatable} annotation on this class, or null if the class does not have the annotation.
+     * (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable} annotations.)
      * 
      * <p>
      * Also handles the {@link Inherited} meta-annotation, which causes an annotation to annotate a class and all of
      * its subclasses.
      * 
      * <p>
+     * Note that if you need to get multiple annotations, it is faster to call {@link #getAnnotationInfo()}, and
+     * then get the annotations from the returned {@link AnnotationInfoList}, so that the returned list doesn't have
+     * to be built multiple times.
+     * 
+     * @param annotation
+     *            The annotation.
+     * @return An {@link AnnotationInfo} object representing the annotation on this class, or null if the class does
+     *         not have the annotation.
+     */
+    public AnnotationInfo getAnnotationInfo(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getAnnotationInfo(annotation.getName());
+    }
+
+    /**
+     * Get a the named non-{@link Repeatable} annotation on this class, or null if the class does not have the named
+     * annotation. (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable} annotations.)
+     *
+     * <p>
+     * Also handles the {@link Inherited} meta-annotation, which causes an annotation to annotate a class and all of
+     * its subclasses.
+     *
+     * <p>
      * Note that if you need to get multiple named annotations, it is faster to call {@link #getAnnotationInfo()},
      * and then get the named annotations from the returned {@link AnnotationInfoList}, so that the returned list
      * doesn't have to be built multiple times.
-     * 
+     *
      * @param annotationName
      *            The annotation name.
      * @return An {@link AnnotationInfo} object representing the named annotation on this class, or null if the
@@ -1807,18 +2137,41 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     }
 
     /**
-     * Get a the named {@link Repeatable} annotation on this class, or the empty list if the class does not have the
-     * named annotation.
+     * Get a the {@link Repeatable} annotation on this class, or the empty list if the class does not have the
+     * annotation.
      * 
      * <p>
      * Also handles the {@link Inherited} meta-annotation, which causes an annotation to annotate a class and all of
      * its subclasses.
      * 
      * <p>
+     * Note that if you need to get multiple annotations, it is faster to call {@link #getAnnotationInfo()}, and
+     * then get the annotations from the returned {@link AnnotationInfoList}, so that the returned list doesn't have
+     * to be built multiple times.
+     * 
+     * @param annotation
+     *            The annotation.
+     * @return An {@link AnnotationInfoList} of all instances of the annotation on this class, or the empty list if
+     *         the class does not have the annotation.
+     */
+    public AnnotationInfoList getAnnotationInfoRepeatable(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getAnnotationInfoRepeatable(annotation.getName());
+    }
+
+    /**
+     * Get a the named {@link Repeatable} annotation on this class, or the empty list if the class does not have the
+     * named annotation.
+     *
+     * <p>
+     * Also handles the {@link Inherited} meta-annotation, which causes an annotation to annotate a class and all of
+     * its subclasses.
+     *
+     * <p>
      * Note that if you need to get multiple named annotations, it is faster to call {@link #getAnnotationInfo()},
      * and then get the named annotations from the returned {@link AnnotationInfoList}, so that the returned list
      * doesn't have to be built multiple times.
-     * 
+     *
      * @param annotationName
      *            The annotation name.
      * @return An {@link AnnotationInfoList} of all instances of the named annotation on this class, or the empty
@@ -1841,14 +2194,16 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         if (!isAnnotation()) {
             throw new IllegalArgumentException("Class is not an annotation: " + getName());
         }
-        if (annotationDefaultParamValues == null) {
-            return AnnotationParameterValueList.EMPTY_LIST;
+        synchronized (this) {
+            if (annotationDefaultParamValues == null) {
+                return AnnotationParameterValueList.EMPTY_LIST;
+            }
+            if (!annotationDefaultParamValuesHasBeenConvertedToPrimitive) {
+                annotationDefaultParamValues.convertWrapperArraysToPrimitiveArrays(this);
+                annotationDefaultParamValuesHasBeenConvertedToPrimitive = true;
+            }
+            return annotationDefaultParamValues;
         }
-        if (!annotationDefaultParamValuesHasBeenConvertedToPrimitive) {
-            annotationDefaultParamValues.convertWrapperArraysToPrimitiveArrays(this);
-            annotationDefaultParamValuesHasBeenConvertedToPrimitive = true;
-        }
-        return annotationDefaultParamValues;
     }
 
     /**
@@ -1861,9 +2216,6 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
     public ClassInfoList getClassesWithAnnotation() {
         if (!scanResult.scanSpec.enableAnnotationInfo) {
             throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
-        }
-        if (!isAnnotation()) {
-            throw new IllegalArgumentException("Class is not an annotation: " + getName());
         }
 
         // Get classes that have this annotation
@@ -1979,12 +2331,11 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         // Implement method/constructor overriding
         final MethodInfoList methodInfoList = new MethodInfoList();
         final Set<Entry<String, String>> nameAndTypeDescriptorSet = new HashSet<>();
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getMethodOverrideOrder()) {
             for (final MethodInfo mi : ci.getDeclaredMethodInfo(methodName, getNormalMethods, getConstructorMethods,
                     getStaticInitializerMethods)) {
                 // If method/constructor has not been overridden by method of same name and type descriptor 
-                if (nameAndTypeDescriptorSet
-                        .add(new SimpleEntry<>(mi.getName(), mi.getTypeDescriptor().toString()))) {
+                if (nameAndTypeDescriptorSet.add(new SimpleEntry<>(mi.getName(), mi.getTypeDescriptorStr()))) {
                     // Add method/constructor to output order
                     methodInfoList.add(mi);
                 }
@@ -2433,7 +2784,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         // Implement field overriding
         final FieldInfoList fieldInfoList = new FieldInfoList();
         final Set<String> fieldNameSet = new HashSet<>();
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getFieldOverrideOrder()) {
             for (final FieldInfo fi : ci.getDeclaredFieldInfo()) {
                 // If field has not been overridden by field of same name 
                 if (fieldNameSet.add(fi.getName())) {
@@ -2443,6 +2794,42 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
             }
         }
         return fieldInfoList;
+    }
+
+    /**
+     * @return All enum constants of an enum class as a list of {@link FieldInfo} objects (enum constants are stored
+     *         as fields in Java classes).
+     */
+    public FieldInfoList getEnumConstants() {
+        if (!isEnum()) {
+            throw new IllegalArgumentException("Class " + getName() + " is not an enum");
+        }
+        return getFieldInfo().filter(new FieldInfoFilter() {
+            @Override
+            public boolean accept(final FieldInfo fieldInfo) {
+                return fieldInfo.isEnum();
+            }
+        });
+    }
+
+    /** @return All enum constants of an enum class as a list of objects of the same type as the enum. */
+    public List<Object> getEnumConstantObjects() {
+        if (!isEnum()) {
+            throw new IllegalArgumentException("Class " + getName() + " is not an enum");
+        }
+        final Class<?> enumClass = loadClass();
+        final FieldInfoList consts = getEnumConstants();
+        final List<Object> constObjs = new ArrayList<>(consts.size());
+        final ReflectionUtils reflectionUtils = scanResult == null ? new ReflectionUtils()
+                : scanResult.reflectionUtils;
+        for (final FieldInfo constFieldInfo : consts) {
+            final Object constObj = reflectionUtils.getStaticFieldVal(true, enumClass, constFieldInfo.getName());
+            if (constObj == null) {
+                throw new IllegalArgumentException("Could not read enum constant objects");
+            }
+            constObjs.add(constObj);
+        }
+        return constObjs;
     }
 
     /**
@@ -2513,7 +2900,7 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
             throw new IllegalArgumentException("Please call ClassGraph#enableFieldInfo() before #scan()");
         }
         // Implement field overriding
-        for (final ClassInfo ci : getOverrideOrder()) {
+        for (final ClassInfo ci : getFieldOverrideOrder()) {
             final FieldInfo fi = ci.getDeclaredFieldInfo(fieldName);
             if (fi != null) {
                 return fi;
@@ -2572,17 +2959,29 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *
      * @return The parsed type signature for the class, including any generic type parameters, or null if not
      *         available (probably indicating the class is not generic).
+     * @throws IllegalArgumentException
+     *             if the class type signature cannot be parsed (this should only be thrown in the case of classfile
+     *             corruption, or a compiler bug that causes an invalid type signature to be written to the
+     *             classfile).
      */
     public ClassTypeSignature getTypeSignature() {
-        if (typeSignatureStr == null) {
-            return null;
-        }
-        if (typeSignature == null) {
-            try {
-                typeSignature = ClassTypeSignature.parse(typeSignatureStr, this);
-                typeSignature.setScanResult(scanResult);
-            } catch (final ParseException e) {
-                throw new IllegalArgumentException(e);
+        synchronized (this) {
+            if (typeSignatureStr == null) {
+                return null;
+            }
+            if (typeSignature == null) {
+                try {
+                    typeSignature = ClassTypeSignature.parse(typeSignatureStr, this);
+                    typeSignature.setScanResult(scanResult);
+                    if (typeAnnotationDecorators != null) {
+                        for (final ClassTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                            decorator.decorate(typeSignature);
+                        }
+                    }
+                } catch (final ParseException e) {
+                    throw new IllegalArgumentException("Invalid type signature for class " + getName()
+                            + " in classpath element " + getClasspathElementURI() + " : " + typeSignatureStr, e);
+                }
             }
         }
         return typeSignature;
@@ -2598,6 +2997,62 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         return typeSignatureStr;
     }
 
+    /**
+     * Returns the parsed type signature for this class, possibly including type parameters. If the type signature
+     * is not present for this class, indicating that this is not a generic class, then a type descriptor will be
+     * synthesized and returned, as if there were a type descriptor (classfiles may have a type signature but do not
+     * contain a type descriptor). May include type annotations on the superclass or interface(s).
+     * 
+     * @return The parsed generic type signature for the class, or if not available, the synthetic type descriptor
+     *         for the class.
+     */
+    public ClassTypeSignature getTypeSignatureOrTypeDescriptor() {
+        ClassTypeSignature typeSig = null;
+        try {
+            typeSig = getTypeSignature();
+            if (typeSig != null) {
+                return typeSig;
+            }
+        } catch (final Exception e) {
+            // Ignore
+        }
+        return getTypeDescriptor();
+    }
+
+    /**
+     * Returns a synthetic type descriptor for the method, created from the class name, superclass name, and
+     * implemented interfaces. May include type annotations on the superclass or interface(s).
+     * 
+     * @return The synthetic type descriptor for the class.
+     */
+    public ClassTypeSignature getTypeDescriptor() {
+        synchronized (this) {
+            if (typeDescriptor == null) {
+                typeDescriptor = new ClassTypeSignature(this, getSuperclass(), getInterfaces());
+                typeDescriptor.setScanResult(scanResult);
+                if (typeAnnotationDecorators != null) {
+                    for (final ClassTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                        decorator.decorate(typeDescriptor);
+                    }
+                }
+            }
+        }
+        return typeDescriptor;
+    }
+
+    /**
+     * Returns the name of the source file this class has been compiled from, such as {@code ClassInfo.java} or
+     * {@code KClass.kt}.
+     *
+     * <p>
+     * This field may be {@code null}.
+     *
+     * @return The name of the source file of this class, or {@code null} if not available
+     */
+    public String getSourceFile() {
+        return sourceFile;
+    }
+
     // -------------------------------------------------------------------------------------------------------------
 
     /**
@@ -2608,10 +3063,9 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *             if the classpath element does not have a valid URI (e.g. for modules whose location URI is null).
      */
     public URI getClasspathElementURI() {
-        if (classpathElement == null) {
-            throw new IllegalArgumentException("Classpath element is not known for this classpath element");
-        }
-        return classpathElement.getURI();
+        // Calling classfileResource.getClasspathElementURI() rather than classpathElement.getURI() will append
+        // any automatically-stripped package root prefix
+        return classfileResource.getClasspathElementURI();
     }
 
     /**
@@ -2626,12 +3080,9 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *             a {@code jrt:/} scheme).
      */
     public URL getClasspathElementURL() {
-        if (classpathElement == null) {
-            throw new IllegalArgumentException("Classpath element is not known for this classpath element");
-        }
         try {
-            return classpathElement.getURI().toURL();
-        } catch (final MalformedURLException e) {
+            return getClasspathElementURI().toURL();
+        } catch (final IllegalArgumentException | MalformedURLException e) {
             throw new IllegalArgumentException("Could not get classpath element URL", e);
         }
     }
@@ -2861,12 +3312,14 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
      *            the map from class name to {@link ClassInfo}.
      * @param refdClassInfo
      *            the referenced class info
+     * @param log
+     *            the log
      */
     @Override
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
         // Add this class to the set of references
-        super.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+        super.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         if (this.referencedClassNames != null) {
             for (final String refdClassName : this.referencedClassNames) {
                 final ClassInfo classInfo = ClassInfo.getOrCreateClassInfo(refdClassName, classNameToClassInfo);
@@ -2874,15 +3327,21 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
                 refdClassInfo.add(classInfo);
             }
         }
-        getMethodInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
-        getFieldInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
-        getAnnotationInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+        getMethodInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+        getFieldInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+        getAnnotationInfo().findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         if (annotationDefaultParamValues != null) {
-            annotationDefaultParamValues.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            annotationDefaultParamValues.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         }
-        final ClassTypeSignature classSig = getTypeSignature();
-        if (classSig != null) {
-            classSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+        try {
+            final ClassTypeSignature classSig = getTypeSignature();
+            if (classSig != null) {
+                classSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+            }
+        } catch (final IllegalArgumentException e) {
+            if (log != null) {
+                log.log("Illegal type signature for class " + getClassName() + ": " + getTypeSignatureStr());
+            }
         }
     }
 
@@ -2957,62 +3416,87 @@ public class ClassInfo extends ScanResultObject implements Comparable<ClassInfo>
         return name == null ? 0 : name.hashCode();
     }
 
+    // -------------------------------------------------------------------------------------------------------------
+
     /**
      * To string.
      *
-     * @param typeNameOnly
-     *            if true, convert type name to string only.
-     * @return the string
+     * @param useSimpleNames
+     *            use simple names
+     * @param buf
+     *            the buf
      */
-    protected String toString(final boolean typeNameOnly) {
-        final ClassTypeSignature typeSig = getTypeSignature();
-        if (typeSig != null) {
-            // Generic classes
-            return typeSig.toString(name, typeNameOnly, modifiers, isAnnotation(), isInterface());
-        } else {
-            // Non-generic classes
-            final StringBuilder buf = new StringBuilder();
-            if (typeNameOnly) {
-                buf.append(name);
-            } else {
-                TypeUtils.modifiersToString(modifiers, ModifierType.CLASS, /* ignored */ false, buf);
-                if (buf.length() > 0) {
+    @Override
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
+        final boolean initialBufEmpty = buf.length() == 0;
+        if (annotationInfo != null) {
+            for (final AnnotationInfo annotation : annotationInfo) {
+                if (buf.length() > 0 && buf.charAt(buf.length() - 1) != ' '
+                        && buf.charAt(buf.length() - 1) != '(') {
                     buf.append(' ');
                 }
+                annotation.toString(useSimpleNames, buf);
+            }
+        }
+        ClassTypeSignature typeSig = null;
+        try {
+            typeSig = getTypeSignature();
+        } catch (final Exception e) {
+            // Ignore
+        }
+        if (typeSig != null) {
+            // Generic classes
+            typeSig.toStringInternal(useSimpleNames ? ClassInfo.getSimpleName(name) : name,
+                    /* useSimpleNames = */ false, modifiers, isAnnotation(), isInterface(),
+                    /* annotationsToExclude = */ annotationInfo, buf);
+        } else {
+            // Non-generic classes
+            TypeUtils.modifiersToString(modifiers, ModifierType.CLASS, /* ignored */ false, buf);
+            if (buf.length() > 0 && buf.charAt(buf.length() - 1) != ' ' && buf.charAt(buf.length() - 1) != '(') {
+                buf.append(' ');
+            }
+            // Don't put class type in extends/implements clauses
+            if (initialBufEmpty) {
                 buf.append(isRecord() ? "record " //
                         : isEnum() ? "enum " //
                                 : isAnnotation() ? "@interface " //
                                         : isInterface() ? "interface " //
                                                 : "class ");
-                buf.append(name);
-                final ClassInfo superclass = getSuperclass();
-                if (superclass != null && !superclass.getName().equals("java.lang.Object")) {
-                    buf.append(" extends ").append(superclass.toString(/* typeNameOnly = */ true));
-                }
-                final Set<ClassInfo> interfaces = this.filterClassInfo(RelType.IMPLEMENTED_INTERFACES,
-                        /* strictAccept = */ false).directlyRelatedClasses;
-                if (!interfaces.isEmpty()) {
-                    buf.append(isInterface() ? " extends " : " implements ");
-                    boolean first = true;
-                    for (final ClassInfo iface : interfaces) {
-                        if (first) {
-                            first = false;
-                        } else {
-                            buf.append(", ");
-                        }
-                        buf.append(iface.toString(/* typeNameOnly = */ true));
+            }
+            buf.append(useSimpleNames ? ClassInfo.getSimpleName(name) : name);
+            if (isRecord) {
+                // Add params, if this is a record class
+                buf.append('(');
+                boolean isFirstParam = true;
+                for (final FieldInfo fieldInfo : getFieldInfo()) {
+                    if (!isFirstParam) {
+                        buf.append(", ");
+                    } else {
+                        isFirstParam = false;
                     }
+                    fieldInfo.toString(/* useModifiers = */ false, /* useSimpleNames = */ false, buf);
+                }
+                buf.append(')');
+            }
+            final ClassInfo superclass = getSuperclass();
+            if (superclass != null && !superclass.getName().equals("java.lang.Object")) {
+                buf.append(" extends ");
+                superclass.toString(useSimpleNames, buf);
+            }
+            final Set<ClassInfo> interfaces = this.filterClassInfo(RelType.IMPLEMENTED_INTERFACES,
+                    /* strictAccept = */ false).directlyRelatedClasses;
+            if (!interfaces.isEmpty()) {
+                buf.append(isInterface() ? " extends " : " implements ");
+                boolean first = true;
+                for (final ClassInfo iface : interfaces) {
+                    if (first) {
+                        first = false;
+                    } else {
+                        buf.append(", ");
+                    }
+                    iface.toString(useSimpleNames, buf);
                 }
             }
-            return buf.toString();
         }
-    }
-
-    /* (non-Javadoc)
-     * @see java.lang.Object#toString()
-     */
-    @Override
-    public String toString() {
-        return toString(false);
     }
 }

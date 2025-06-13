@@ -34,7 +34,6 @@ import nonapi.io.github.classgraph.classpath.ClassLoaderOrder;
 import nonapi.io.github.classgraph.classpath.ClasspathOrder;
 import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.utils.LogNode;
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
 
 /**
  * Handle the OSGi DefaultClassLoader.
@@ -89,12 +88,16 @@ class OSGiDefaultClassLoaderHandler implements ClassLoaderHandler {
      */
     public static void findClasspathOrder(final ClassLoader classLoader, final ClasspathOrder classpathOrder,
             final ScanSpec scanSpec, final LogNode log) {
-        final Object classpathManager = ReflectionUtils.invokeMethod(classLoader, "getClasspathManager", false);
-        final Object[] entries = (Object[]) ReflectionUtils.getFieldVal(classpathManager, "entries", false);
+        final Object classpathManager = classpathOrder.reflectionUtils.invokeMethod(false, classLoader,
+                "getClasspathManager");
+        final Object[] entries = (Object[]) classpathOrder.reflectionUtils.getFieldVal(false, classpathManager,
+                "entries");
         if (entries != null) {
             for (final Object entry : entries) {
-                final Object bundleFile = ReflectionUtils.invokeMethod(entry, "getBundleFile", false);
-                final File baseFile = (File) ReflectionUtils.invokeMethod(bundleFile, "getBaseFile", false);
+                final Object bundleFile = classpathOrder.reflectionUtils.invokeMethod(false, entry,
+                        "getBundleFile");
+                final File baseFile = (File) classpathOrder.reflectionUtils.invokeMethod(false, bundleFile,
+                        "getBaseFile");
                 if (baseFile != null) {
                     classpathOrder.addClasspathEntry(baseFile.getPath(), classLoader, scanSpec, log);
                 }

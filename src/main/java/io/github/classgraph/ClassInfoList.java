@@ -170,7 +170,7 @@ public class ClassInfoList extends MappableInfoList<ClassInfo> {
     public ClassInfoList(final Collection<ClassInfo> classInfoCollection) {
         this(classInfoCollection instanceof Set //
                 ? (Set<ClassInfo>) classInfoCollection
-                : new HashSet<ClassInfo>(classInfoCollection), //
+                : new HashSet<>(classInfoCollection), //
                 /* directlyRelatedClasses = */ null, /* sortByName = */ true);
     }
 
@@ -590,12 +590,45 @@ public class ClassInfoList extends MappableInfoList<ClassInfo> {
      * parameters of (10.5f, 8f, scanSpec.enableExternalClasses), where scanSpec.enableExternalClasses is true if
      * {@link ClassGraph#enableExternalClasses()} was called before scanning.
      *
+     * @param sizeX
+     *            The GraphViz layout width in inches.
+     * @param sizeY
+     *            The GraphViz layout width in inches.
      * @return the GraphViz file contents.
      * @throws IllegalArgumentException
      *             if this {@link ClassInfoList} is empty or {@link ClassGraph#enableInterClassDependencies()} was
      *             not called before scanning (since there would be nothing to graph).
      */
-    public String generateGraphVizDotFileFromClassDependencies() {
+    public String generateGraphVizDotFileFromInterClassDependencies(final float sizeX, final float sizeY) {
+        if (isEmpty()) {
+            throw new IllegalArgumentException("List is empty");
+        }
+        final ScanSpec scanSpec = get(0).scanResult.scanSpec;
+        if (!scanSpec.enableInterClassDependencies) {
+            throw new IllegalArgumentException(
+                    "Please call ClassGraph#enableInterClassDependencies() before #scan()");
+        }
+        return GraphvizDotfileGenerator.generateGraphVizDotFileFromInterClassDependencies(this, sizeX, sizeY,
+                scanSpec.enableExternalClasses);
+    }
+
+    /**
+     * Generate a .dot file which can be fed into GraphViz for layout and visualization of the class graph. The
+     * returned graph shows inter-class dependencies only. The sizeX and sizeY parameters are the image output size
+     * to use (in inches) when GraphViz is asked to render the .dot file. You must have called
+     * {@link ClassGraph#enableInterClassDependencies()} before scanning to use this method.
+     * 
+     * <p>
+     * Equivalent to calling {@link #generateGraphVizDotFileFromInterClassDependencies(float, float, boolean)} with
+     * parameters of (10.5f, 8f, scanSpec.enableExternalClasses), where scanSpec.enableExternalClasses is true if
+     * {@link ClassGraph#enableExternalClasses()} was called before scanning.
+     *
+     * @return the GraphViz file contents.
+     * @throws IllegalArgumentException
+     *             if this {@link ClassInfoList} is empty or {@link ClassGraph#enableInterClassDependencies()} was
+     *             not called before scanning (since there would be nothing to graph).
+     */
+    public String generateGraphVizDotFileFromInterClassDependencies() {
         if (isEmpty()) {
             throw new IllegalArgumentException("List is empty");
         }
@@ -606,6 +639,20 @@ public class ClassInfoList extends MappableInfoList<ClassInfo> {
         }
         return GraphvizDotfileGenerator.generateGraphVizDotFileFromInterClassDependencies(this, 10.5f, 8.0f,
                 scanSpec.enableExternalClasses);
+    }
+
+    /**
+     * Deprecated: use {@link #generateGraphVizDotFileFromInterClassDependencies()} instead.
+     * 
+     * @deprecated Use {@link #generateGraphVizDotFileFromInterClassDependencies()} instead.
+     * @return the GraphViz file contents.
+     * @throws IllegalArgumentException
+     *             if this {@link ClassInfoList} is empty or {@link ClassGraph#enableInterClassDependencies()} was
+     *             not called before scanning (since there would be nothing to graph).
+     */
+    @Deprecated
+    public String generateGraphVizDotFileFromClassDependencies() {
+        return generateGraphVizDotFileFromInterClassDependencies();
     }
 
     // -------------------------------------------------------------------------------------------------------------

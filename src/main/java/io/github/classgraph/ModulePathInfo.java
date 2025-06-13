@@ -33,10 +33,11 @@ import java.util.Arrays;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.concurrent.atomic.AtomicBoolean;
 
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.utils.JarUtils;
-import nonapi.io.github.classgraph.utils.Join;
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
+import nonapi.io.github.classgraph.utils.StringUtils;
 
 /**
  * Information on the module path. Note that this will only include module system parameters actually listed in
@@ -126,37 +127,42 @@ public class ModulePathInfo {
             '\0' // --add-reads (only one param per switch)
     );
 
-    /** Construct a {@link ModulePathInfo}. */
-    public ModulePathInfo() {
-        // Read the raw commandline arguments to get the module path override parameters.
-        // If the java.management module is not present in the deployed runtime (for JDK 9+), or the runtime
-        // does not contain the java.lang.management package (e.g. the Android build system, which also does
-        // not support JPMS currently), then skip trying to read the commandline arguments (#404).
-        final Class<?> managementFactory = ReflectionUtils
-                .classForNameOrNull("java.lang.management.ManagementFactory");
-        final Object runtimeMXBean = managementFactory == null ? null
-                : ReflectionUtils.invokeStaticMethod(managementFactory, "getRuntimeMXBean",
-                        /* throwException = */ false);
-        @SuppressWarnings("unchecked")
-        final List<String> commandlineArguments = runtimeMXBean == null ? null
-                : (List<String>) ReflectionUtils.invokeMethod(runtimeMXBean, "getInputArguments",
-                        /* throwException = */ false);
-        if (commandlineArguments != null) {
-            for (final String arg : commandlineArguments) {
-                for (int i = 0; i < fields.size(); i++) {
-                    final String argSwitch = argSwitches.get(i);
-                    if (arg.startsWith(argSwitch)) {
-                        final String argParam = arg.substring(argSwitch.length());
-                        final Set<String> argField = fields.get(i);
-                        final char sepChar = argPartSeparatorChars.get(i);
-                        if (sepChar == '\0') {
-                            // Only one param per switch
-                            argField.add(argParam);
-                        } else {
-                            // Split arg param into parts
-                            for (final String argPart : JarUtils.smartPathSplit(argParam, sepChar,
-                                    /* scanSpec = */ null)) {
-                                argField.add(argPart);
+    /** Set to true once {@link #getRuntimeInfo()} is called. */
+    private final AtomicBoolean gotRuntimeInfo = new AtomicBoolean();
+
+    /** Fill in module info from VM commandline parameters. */
+    void getRuntimeInfo(final ReflectionUtils reflectionUtils) {
+        // Only call this reflective method if ModulePathInfo is specifically requested, to avoid illegal
+        // access warning on some JREs, e.g. Adopt JDK 11 (#605)
+        if (!gotRuntimeInfo.getAndSet(true)) {
+            // Read the raw commandline arguments to get the module path override parameters.
+            // If the java.management module is not present in the deployed runtime (for JDK 9+), or the runtime
+            // does not contain the java.lang.management package (e.g. the Android build system, which also does
+            // not support JPMS currently), then skip trying to read the commandline arguments (#404).
+            final Class<?> managementFactory = reflectionUtils
+                    .classForNameOrNull("java.lang.management.ManagementFactory");
+            final Object runtimeMXBean = managementFactory == null ? null
+                    : reflectionUtils.invokeStaticMethod(/* throwException = */ false, managementFactory,
+                            "getRuntimeMXBean");
+            @SuppressWarnings("unchecked")
+            final List<String> commandlineArguments = runtimeMXBean == null ? null
+                    : (List<String>) reflectionUtils.invokeMethod(/* throwException = */ false, runtimeMXBean,
+                            "getInputArguments");
+            if (commandlineArguments != null) {
+                for (final String arg : commandlineArguments) {
+                    for (int i = 0; i < fields.size(); i++) {
+                        final String argSwitch = argSwitches.get(i);
+                        if (arg.startsWith(argSwitch)) {
+                            final String argParam = arg.substring(argSwitch.length());
+                            final Set<String> argField = fields.get(i);
+                            final char sepChar = argPartSeparatorChars.get(i);
+                            if (sepChar == '\0') {
+                                // Only one param per switch
+                                argField.add(argParam);
+                            } else {
+                                // Split arg param into parts
+                                argField.addAll(Arrays
+                                        .asList(JarUtils.smartPathSplit(argParam, sepChar, /* scanSpec = */ null)));
                             }
                         }
                     }
@@ -175,14 +181,14 @@ public class ModulePathInfo {
         final StringBuilder buf = new StringBuilder(1024);
         if (!modulePath.isEmpty()) {
             buf.append("--module-path=");
-            buf.append(Join.join(File.pathSeparator, modulePath));
+            buf.append(StringUtils.join(File.pathSeparator, modulePath));
         }
         if (!addModules.isEmpty()) {
             if (buf.length() > 0) {
                 buf.append(' ');
             }
             buf.append("--add-modules=");
-            buf.append(Join.join(",", addModules));
+            buf.append(StringUtils.join(",", addModules));
         }
         for (final String patchModulesEntry : patchModules) {
             if (buf.length() > 0) {

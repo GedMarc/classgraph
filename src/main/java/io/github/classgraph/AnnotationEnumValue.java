@@ -118,15 +118,15 @@ public class AnnotationEnumValue extends ScanResultObject implements Comparable<
         try {
             field = classRef.getDeclaredField(valueName);
         } catch (final ReflectiveOperationException | SecurityException e) {
-            throw new IllegalArgumentException("Could not find enum constant " + toString(), e);
+            throw new IllegalArgumentException("Could not find enum constant " + this, e);
         }
         if (!field.isEnumConstant()) {
-            throw new IllegalArgumentException("Field " + toString() + " is not an enum constant");
+            throw new IllegalArgumentException("Field " + this + " is not an enum constant");
         }
         try {
             return field.get(null);
         } catch (final ReflectiveOperationException | SecurityException e) {
-            throw new IllegalArgumentException("Field " + toString() + " is not accessible", e);
+            throw new IllegalArgumentException("Field " + this + " is not accessible", e);
         }
     }
 
@@ -174,11 +174,10 @@ public class AnnotationEnumValue extends ScanResultObject implements Comparable<
         return className.hashCode() * 11 + valueName.hashCode();
     }
 
-    /* (non-Javadoc)
-     * @see java.lang.Object#toString()
-     */
     @Override
-    public String toString() {
-        return className + "." + valueName;
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
+        buf.append(useSimpleNames ? ClassInfo.getSimpleName(className) : className);
+        buf.append('.');
+        buf.append(valueName);
     }
 }

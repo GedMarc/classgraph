@@ -121,4 +121,29 @@ public class InfoList<T extends HasName> extends PotentiallyUnmodifiableList<T> 
             return toStringVals;
         }
     }
+
+    /**
+     * Get the String representations of all items in this list, using only <a href=
+     * "https://docs.oracle.com/en/java/javase/15/docs/api/java.base/java/lang/Class.html#getSimpleName()">simple
+     * names</a> of any named classes, by calling {@code ScanResultObject#toStringWithSimpleNames()} if the object
+     * is a subclass of {@code ScanResultObject} (e.g. {@link ClassInfo}, {@link MethodInfo} or {@link FieldInfo}
+     * object), otherwise calling {@code toString()}, for each item in the list.
+     *
+     * @return The String representations of all items in this list, using only the <a href=
+     *         "https://docs.oracle.com/en/java/javase/15/docs/api/java.base/java/lang/Class.html#getSimpleName()">
+     *         simple names</a> of any named classes.
+     */
+    public List<String> getAsStringsWithSimpleNames() {
+        if (this.isEmpty()) {
+            return Collections.emptyList();
+        } else {
+            final List<String> toStringVals = new ArrayList<>(this.size());
+            for (final T i : this) {
+                toStringVals.add(i == null ? "null"
+                        : i instanceof ScanResultObject ? ((ScanResultObject) i).toStringWithSimpleNames()
+                                : i.toString());
+            }
+            return toStringVals;
+        }
+    }
 }

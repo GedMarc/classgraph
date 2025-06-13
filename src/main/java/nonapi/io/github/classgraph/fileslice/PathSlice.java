@@ -28,7 +28,6 @@
  */
 package nonapi.io.github.classgraph.fileslice;
 
-import java.io.Closeable;
 import java.io.IOException;
 import java.io.InputStream;
 import java.nio.ByteBuffer;
@@ -45,7 +44,7 @@ import nonapi.io.github.classgraph.fileslice.reader.RandomAccessReader;
 import nonapi.io.github.classgraph.utils.FileUtils;
 
 /** A {@link Path} slice. */
-public class PathSlice extends Slice implements Closeable {
+public class PathSlice extends Slice {
     /** The {@link Path}. */
     public final Path path;
 
@@ -88,8 +87,10 @@ public class PathSlice extends Slice implements Closeable {
         this.fileLength = parentSlice.fileLength;
         this.isTopLevelFileSlice = false;
 
-        // Only mark toplevel file slices as open (sub slices don't need to be marked as open since
-        // they don't need to be closed, they just copy the resource references of the toplevel slice) 
+        // Only mark toplevel file slices as open (sub slices don't need to be marked as
+        // open since
+        // they don't need to be closed, they just copy the resource references of the
+        // toplevel slice)
     }
 
     /**
@@ -109,17 +110,42 @@ public class PathSlice extends Slice implements Closeable {
      */
     public PathSlice(final Path path, final boolean isDeflatedZipEntry, final long inflatedLengthHint,
             final NestedJarHandler nestedJarHandler) throws IOException {
+        this(path, isDeflatedZipEntry, inflatedLengthHint, nestedJarHandler, true);
+    }
+
+    /**
+     * Constructor for toplevel file slice.
+     *
+     * @param path
+     *            the path
+     * @param isDeflatedZipEntry
+     *            true if this is a deflated zip entry
+     * @param inflatedLengthHint
+     *            the uncompressed size of a deflated zip entry, or -1 if unknown, or 0 of this is not a deflated
+     *            zip entry.
+     * @param nestedJarHandler
+     *            the nested jar handler
+     * @param checkAccess
+     *            whether it is needed to check read access and if it is a file
+     * @throws IOException
+     *             if the file cannot be opened.
+     */
+    public PathSlice(final Path path, final boolean isDeflatedZipEntry, final long inflatedLengthHint,
+            final NestedJarHandler nestedJarHandler, final boolean checkAccess) throws IOException {
         super(0L, isDeflatedZipEntry, inflatedLengthHint, nestedJarHandler);
 
-        // Make sure the File is readable and is a regular file
-        FileUtils.checkCanReadAndIsFile(path);
+        if (checkAccess) {
+            // Make sure the File is readable and is a regular file
+            FileUtils.checkCanReadAndIsFile(path);
+        }
 
         this.path = path;
         this.fileChannel = FileChannel.open(path, StandardOpenOption.READ);
         this.fileLength = fileChannel.size();
         this.isTopLevelFileSlice = true;
 
-        // Had to use 0L for sliceLength in call to super, since FileChannel wasn't open yet => update sliceLength
+        // Had to use 0L for sliceLength in call to super, since FileChannel wasn't open
+        // yet => update sliceLength
         this.sliceLength = fileLength;
 
         // Mark toplevel slice as open
@@ -217,8 +243,10 @@ public class PathSlice extends Slice implements Closeable {
     @Override
     public ByteBuffer read() throws IOException {
         if (isDeflatedZipEntry) {
-            // Inflate to RAM if deflated (unfortunately there is no lazy-loading ByteBuffer that will
-            // decompress partial streams on demand, so we have to decompress the whole zip entry) 
+            // Inflate to RAM if deflated (unfortunately there is no lazy-loading ByteBuffer
+            // that will
+            // decompress partial streams on demand, so we have to decompress the whole zip
+            // entry)
             if (inflatedLengthHint > FileUtils.MAX_BUFFER_SIZE) {
                 throw new IOException("Uncompressed size is larger than 2GB");
             }
@@ -245,17 +273,16 @@ public class PathSlice extends Slice implements Closeable {
     @Override
     public void close() {
         if (!isClosed.getAndSet(true)) {
-            if (isTopLevelFileSlice) {
-                // Only close the FileChannel in the toplevel file slice, so that it is only closed once
-                if (fileChannel != null) {
-                    try {
-                        // Closing raf will also close the associated FileChannel
-                        fileChannel.close();
-                    } catch (final IOException e) {
-                        // Ignore
-                    }
-                    fileChannel = null;
+            if (isTopLevelFileSlice && fileChannel != null) {
+                // Only close the FileChannel in the toplevel file slice, so that it is only
+                // closed once
+                try {
+                    // Closing raf will also close the associated FileChannel
+                    fileChannel.close();
+                } catch (final IOException e) {
+                    // Ignore
                 }
+                fileChannel = null;
             }
             fileChannel = null;
             nestedJarHandler.markSliceAsClosed(this);

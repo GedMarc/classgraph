@@ -28,11 +28,14 @@
  */
 package io.github.classgraph;
 
+import java.lang.annotation.Annotation;
 import java.lang.annotation.Repeatable;
 import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.Objects;
+
+import nonapi.io.github.classgraph.utils.Assert;
 
 /**
  * Information on the parameters of a method.
@@ -179,10 +182,24 @@ public class MethodParameterInfo {
     }
 
     /**
+     * Get a the non-{@link Repeatable} annotation on this method, or null if the method parameter does not have the
+     * annotation. (Use {@link #getAnnotationInfoRepeatable(Class)} for {@link Repeatable} annotations.)
+     * 
+     * @param annotation
+     *            The annotation.
+     * @return An {@link AnnotationInfo} object representing the annotation on this method parameter, or null if the
+     *         method parameter does not have the annotation.
+     */
+    public AnnotationInfo getAnnotationInfo(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getAnnotationInfo(annotation.getName());
+    }
+
+    /**
      * Get a the named non-{@link Repeatable} annotation on this method, or null if the method parameter does not
      * have the named annotation. (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable}
      * annotations.)
-     * 
+     *
      * @param annotationName
      *            The annotation name.
      * @return An {@link AnnotationInfo} object representing the named annotation on this method parameter, or null
@@ -193,9 +210,23 @@ public class MethodParameterInfo {
     }
 
     /**
+     * Get a the {@link Repeatable} annotation on this method, or the empty list if the method parameter does not
+     * have the annotation.
+     * 
+     * @param annotation
+     *            The annotation.
+     * @return An {@link AnnotationInfoList} containing all instances of the annotation on this method parameter, or
+     *         the empty list if the method parameter does not have the annotation.
+     */
+    public AnnotationInfoList getAnnotationInfoRepeatable(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return getAnnotationInfoRepeatable(annotation.getName());
+    }
+
+    /**
      * Get a the named {@link Repeatable} annotation on this method, or the empty list if the method parameter does
      * not have the named annotation.
-     * 
+     *
      * @param annotationName
      *            The annotation name.
      * @return An {@link AnnotationInfoList} containing all instances of the named annotation on this method
@@ -203,6 +234,18 @@ public class MethodParameterInfo {
      */
     public AnnotationInfoList getAnnotationInfoRepeatable(final String annotationName) {
         return getAnnotationInfo().getRepeatable(annotationName);
+    }
+
+    /**
+     * Check whether this method parameter has the annotation.
+     *
+     * @param annotation
+     *            The annotation.
+     * @return true if this method parameter has the annotation.
+     */
+    public boolean hasAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return hasAnnotation(annotation.getName());
     }
 
     /**
@@ -314,27 +357,52 @@ public class MethodParameterInfo {
         }
     }
 
-    /* (non-Javadoc)
-     * @see java.lang.Object#toString()
-     */
-    @Override
-    public String toString() {
-        final StringBuilder buf = new StringBuilder();
+    // -------------------------------------------------------------------------------------------------------------
 
+    /**
+     * Render to string.
+     *
+     * @param useSimpleNames
+     *            if true, use just the simple name of each class.
+     * @param buf
+     *            the buf
+     */
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
         if (annotationInfo != null) {
             for (final AnnotationInfo anAnnotationInfo : annotationInfo) {
-                anAnnotationInfo.toString(buf);
+                anAnnotationInfo.toString(useSimpleNames, buf);
                 buf.append(' ');
             }
         }
 
         modifiersToString(modifiers, buf);
 
-        buf.append(getTypeSignatureOrTypeDescriptor().toString());
+        getTypeSignatureOrTypeDescriptor().toString(useSimpleNames, buf);
 
         buf.append(' ');
         buf.append(name == null ? "_unnamed_param" : name);
+    }
 
+    /**
+     * Render to string with simple names for classes.
+     *
+     * @return the string representation.
+     */
+    public String toStringWithSimpleNames() {
+        final StringBuilder buf = new StringBuilder();
+        toString(/* useSimpleNames = */ true, buf);
+        return buf.toString();
+    }
+
+    /**
+     * Render to string.
+     *
+     * @return the string representation.
+     */
+    @Override
+    public String toString() {
+        final StringBuilder buf = new StringBuilder();
+        toString(/* useSimpleNames = */ false, buf);
         return buf.toString();
     }
 }

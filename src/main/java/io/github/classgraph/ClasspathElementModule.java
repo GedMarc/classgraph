@@ -34,6 +34,7 @@ import java.io.InputStream;
 import java.net.URI;
 import java.nio.ByteBuffer;
 import java.nio.file.attribute.PosixFilePermission;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
@@ -41,6 +42,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 
 import io.github.classgraph.Scanner.ClasspathEntryWorkUnit;
 import nonapi.io.github.classgraph.concurrency.SingletonMap;
+import nonapi.io.github.classgraph.concurrency.SingletonMap.NewInstanceException;
 import nonapi.io.github.classgraph.concurrency.SingletonMap.NullSingletonException;
 import nonapi.io.github.classgraph.concurrency.WorkQueue;
 import nonapi.io.github.classgraph.fastzipfilereader.LogicalZipFile;
@@ -51,9 +53,14 @@ import nonapi.io.github.classgraph.scanspec.ScanSpec;
 import nonapi.io.github.classgraph.scanspec.ScanSpec.ScanSpecPathMatch;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 import nonapi.io.github.classgraph.utils.LogNode;
+import nonapi.io.github.classgraph.utils.ProxyingInputStream;
 import nonapi.io.github.classgraph.utils.VersionFinder;
 
-/** A module classpath element. */
+/**
+ * A module classpath element.
+ *
+ * @author luke
+ */
 class ClasspathElementModule extends ClasspathElement {
 
     /** The module ref. */
@@ -74,17 +81,18 @@ class ClasspathElementModule extends ClasspathElement {
      *
      * @param moduleRef
      *            the module ref
-     * @param classLoader
-     *            the classloader
+     * @param workUnit
+     *            the work unit
      * @param moduleRefToModuleReaderProxyRecyclerMap
      *            the module ref to module reader proxy recycler map
      * @param scanSpec
      *            the scan spec
      */
-    ClasspathElementModule(final ModuleRef moduleRef, final ClassLoader classLoader,
+    ClasspathElementModule(final ModuleRef moduleRef,
             final SingletonMap<ModuleRef, Recycler<ModuleReaderProxy, IOException>, IOException> // 
-            moduleRefToModuleReaderProxyRecyclerMap, final ScanSpec scanSpec) {
-        super(classLoader, scanSpec);
+            moduleRefToModuleReaderProxyRecyclerMap, final ClasspathEntryWorkUnit workUnit,
+            final ScanSpec scanSpec) {
+        super(workUnit, scanSpec);
         this.moduleRefToModuleReaderProxyRecyclerMap = moduleRefToModuleReaderProxyRecyclerMap;
         this.moduleRef = moduleRef;
     }
@@ -106,9 +114,10 @@ class ClasspathElementModule extends ClasspathElement {
         }
         try {
             moduleReaderProxyRecycler = moduleRefToModuleReaderProxyRecyclerMap.get(moduleRef, log);
-        } catch (final IOException | NullSingletonException e) {
+        } catch (final IOException | NullSingletonException | NewInstanceException e) {
             if (log != null) {
-                log(classpathElementIdx, "Skipping invalid module " + getModuleName() + " : " + e, log);
+                log(classpathElementIdx, "Skipping invalid module " + getModuleName() + " : "
+                        + (e.getCause() == null ? e : e.getCause()), log);
             }
             skipClasspathElement = true;
             return;
@@ -128,15 +137,10 @@ class ClasspathElementModule extends ClasspathElement {
             private ModuleReaderProxy moduleReaderProxy;
 
             /** True if the resource is open. */
-            protected AtomicBoolean isOpen = new AtomicBoolean();
+            private final AtomicBoolean isOpen = new AtomicBoolean();
 
             @Override
             public String getPath() {
-                return resourcePath;
-            }
-
-            @Override
-            public String getPathRelativeToClasspathElement() {
                 return resourcePath;
             }
 
@@ -150,16 +154,23 @@ class ClasspathElementModule extends ClasspathElement {
                 return null; // N/A
             }
 
-            @Override
-            public ByteBuffer read() throws IOException {
+            protected void checkCanOpen() {
                 if (skipClasspathElement) {
                     // Shouldn't happen
-                    throw new IOException("Module could not be opened");
+                    throw new IllegalStateException("Classpath element could not be opened");
                 }
                 if (isOpen.getAndSet(true)) {
-                    throw new IOException(
+                    throw new IllegalStateException(
                             "Resource is already open -- cannot open it again without first calling close()");
                 }
+                if (scanResult != null && scanResult.isClosed()) {
+                    throw new IllegalStateException("Cannot open a resource after the ScanResult is closed");
+                }
+            }
+
+            @Override
+            public ByteBuffer read() throws IOException {
+                checkCanOpen();
                 try {
                     moduleReaderProxy = moduleReaderProxyRecycler.acquire();
                     // ModuleReader#read(String name) internally calls:
@@ -176,22 +187,43 @@ class ClasspathElementModule extends ClasspathElement {
 
             @Override
             ClassfileReader openClassfile() throws IOException {
-                return new ClassfileReader(open());
+                return new ClassfileReader(open(), this);
+            }
+
+            @Override
+            public URI getURI() {
+                try {
+                    final ModuleReaderProxy localModuleReaderProxy = moduleReaderProxyRecycler.acquire();
+                    try {
+                        return localModuleReaderProxy.find(resourcePath);
+                    } finally {
+                        moduleReaderProxyRecycler.recycle(localModuleReaderProxy);
+                    }
+                } catch (final IOException e) {
+                    throw new RuntimeException(e);
+                }
             }
 
             @Override
             public InputStream open() throws IOException {
-                if (skipClasspathElement) {
-                    // Shouldn't happen
-                    throw new IOException("Module could not be opened");
-                }
-                if (isOpen.getAndSet(true)) {
-                    throw new IOException(
-                            "Resource is already open -- cannot open it again without first calling close()");
-                }
+                checkCanOpen();
                 try {
+                    final Resource thisResource = this;
                     moduleReaderProxy = moduleReaderProxyRecycler.acquire();
-                    inputStream = moduleReaderProxy.open(resourcePath);
+                    inputStream = new ProxyingInputStream(moduleReaderProxy.open(resourcePath)) {
+                        @Override
+                        public void close() throws IOException {
+                            // Close the wrapped InputStream obtained from moduleReaderProxy
+                            super.close();
+                            try {
+                                // Close the Resource, releasing any underlying ByteBuffer and recycling
+                                // the moduleReaderProxy
+                                thisResource.close();
+                            } catch (final Exception e) {
+                                // Ignore
+                            }
+                        }
+                    };
                     // Length cannot be obtained from ModuleReader
                     length = -1L;
                     return inputStream;
@@ -204,35 +236,40 @@ class ClasspathElementModule extends ClasspathElement {
 
             @Override
             public byte[] load() throws IOException {
-                read();
                 try (Resource res = this) { // Close this after use
+                    read(); // Fill byteBuffer
                     final byte[] byteArray;
-                    if (byteBuffer.hasArray() && byteBuffer.position() == 0
-                            && byteBuffer.limit() == byteBuffer.capacity()) {
-                        byteArray = byteBuffer.array();
+                    if (res.byteBuffer.hasArray() && res.byteBuffer.position() == 0
+                            && res.byteBuffer.limit() == res.byteBuffer.capacity()) {
+                        byteArray = res.byteBuffer.array();
                     } else {
-                        byteArray = new byte[byteBuffer.remaining()];
-                        byteBuffer.get(byteArray);
+                        byteArray = new byte[res.byteBuffer.remaining()];
+                        res.byteBuffer.get(byteArray);
                     }
-                    length = byteArray.length;
+                    res.length = byteArray.length;
                     return byteArray;
                 }
             }
 
             @Override
             public void close() {
-                super.close(); // Close inputStream
-                if (isOpen.getAndSet(false) && moduleReaderProxy != null) {
-                    if (byteBuffer != null) {
-                        // Release any open ByteBuffer
-                        moduleReaderProxy.release(byteBuffer);
+                if (isOpen.getAndSet(false)) {
+                    if (moduleReaderProxy != null) {
+                        if (byteBuffer != null) {
+                            // Release any open ByteBuffer
+                            moduleReaderProxy.release(byteBuffer);
+                            byteBuffer = null;
+                        }
+                        // Recycle the (open) ModuleReaderProxy instance.
+                        moduleReaderProxyRecycler.recycle(moduleReaderProxy);
+                        // Don't call ModuleReaderProxy#close(), leave the ModuleReaderProxy open in the recycler.
+                        // Just set the ref to null here. The ModuleReaderProxy will be closed by
+                        // ClasspathElementModule#close().
+                        moduleReaderProxy = null;
                     }
-                    // Recycle the (open) ModuleReaderProxy instance.
-                    moduleReaderProxyRecycler.recycle(moduleReaderProxy);
-                    // Don't call ModuleReaderProxy#close(), leave the ModuleReaderProxy open in the recycler.
-                    // Just set the ref to null here. The ModuleReaderProxy will be closed by
-                    // ClasspathElementModule#close().
-                    moduleReaderProxy = null;
+
+                    // Close inputStream
+                    super.close();
                 }
             }
         };
@@ -264,7 +301,7 @@ class ClasspathElementModule extends ClasspathElement {
         }
         if (scanned.getAndSet(true)) {
             // Should not happen
-            throw new IllegalArgumentException("Already scanned classpath element " + toString());
+            throw new IllegalArgumentException("Already scanned classpath element " + this);
         }
 
         final LogNode subLog = log == null ? null
@@ -307,7 +344,8 @@ class ClasspathElementModule extends ClasspathElement {
                 // contain a path like "META-INF/versions/{version}/META-INF/versions/{version}/", which cannot
                 // be valid (META-INF should only ever exist in the module root), and the nested versioned section
                 // should be ignored.
-                if (relativePath.startsWith(LogicalZipFile.MULTI_RELEASE_PATH_PREFIX)) {
+                if (!scanSpec.enableMultiReleaseVersions
+                        && relativePath.startsWith(LogicalZipFile.MULTI_RELEASE_PATH_PREFIX)) {
                     if (subLog != null) {
                         subLog.log(
                                 "Found unexpected nested versioned entry in module -- skipping: " + relativePath);
@@ -323,9 +361,8 @@ class ClasspathElementModule extends ClasspathElement {
                 }
 
                 // Accept/reject classpath elements based on file resource paths
-                checkResourcePathAcceptReject(relativePath, log);
-                if (skipClasspathElement) {
-                    return;
+                if (!checkResourcePathAcceptReject(relativePath, log)) {
+                    continue;
                 }
 
                 // Get match status of the parent directory of this resource's relative path (or reuse the last
@@ -429,6 +466,11 @@ class ClasspathElementModule extends ClasspathElement {
             throw new IllegalArgumentException("Module " + getModuleName() + " has a null location");
         }
         return uri;
+    }
+
+    @Override
+    List<URI> getAllURIs() {
+        return Collections.singletonList(getURI());
     }
 
     /* (non-Javadoc)

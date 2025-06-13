@@ -144,7 +144,7 @@ public class FileSlice extends Slice {
             } catch (IOException | OutOfMemoryError e) {
                 // Try running garbage collection then try mapping the file again
                 System.gc();
-                System.runFinalization();
+                nestedJarHandler.runFinalizationMethod();
                 try {
                     backingByteBuffer = fileChannel.map(MapMode.READ_ONLY, 0L, fileLength);
                 } catch (IOException | OutOfMemoryError e2) {
@@ -295,7 +295,7 @@ public class FileSlice extends Slice {
             if (isTopLevelFileSlice && backingByteBuffer != null) {
                 // Only close ByteBuffer in toplevel file slice, so that ByteBuffer is only closed once
                 // (also duplicates of MappedByteBuffers cannot be closed by the cleaner API)
-                FileUtils.closeDirectByteBuffer(backingByteBuffer, /* log = */ null);
+                nestedJarHandler.closeDirectByteBuffer(backingByteBuffer);
             }
             backingByteBuffer = null;
             fileChannel = null;

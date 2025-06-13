@@ -31,34 +31,22 @@ package io.github.classgraph;
 import java.lang.annotation.Repeatable;
 import java.lang.reflect.Field;
 import java.lang.reflect.Modifier;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import io.github.classgraph.ClassInfo.RelType;
+import io.github.classgraph.Classfile.TypeAnnotationDecorator;
 import nonapi.io.github.classgraph.types.ParseException;
 import nonapi.io.github.classgraph.types.TypeUtils;
 import nonapi.io.github.classgraph.types.TypeUtils.ModifierType;
+import nonapi.io.github.classgraph.utils.LogNode;
 
 /**
  * Holds metadata about fields of a class encountered during a scan. All values are taken directly out of the
  * classfile for the class.
  */
-public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>, HasName {
-    /** The declaring class name. */
-    private String declaringClassName;
-
-    /** The name of the field. */
-    private String name;
-
-    /** The modifiers. */
-    private int modifiers;
-
-    /** The type signature string. */
-    private String typeSignatureStr;
-
-    /** The type descriptor string. */
-    private String typeDescriptorStr;
-
+public class FieldInfo extends ClassMemberInfo implements Comparable<FieldInfo> {
     /** The parsed type signature. */
     private transient TypeSignature typeSignature;
 
@@ -69,8 +57,8 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
     // This is transient because the constant initializer value is final, so the value doesn't need to be serialized
     private ObjectTypedValueWrapper constantInitializerValue;
 
-    /** The annotation on the field, if any. */
-    AnnotationInfoList annotationInfo;
+    /** The type annotation decorators for the {@link TypeSignature} instance of this field. */
+    private transient List<TypeAnnotationDecorator> typeAnnotationDecorators;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -99,83 +87,39 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      */
     FieldInfo(final String definingClassName, final String fieldName, final int modifiers,
             final String typeDescriptorStr, final String typeSignatureStr, final Object constantInitializerValue,
-            final AnnotationInfoList annotationInfo) {
-        super();
+            final AnnotationInfoList annotationInfo, final List<TypeAnnotationDecorator> typeAnnotationDecorators) {
+        super(definingClassName, fieldName, modifiers, typeDescriptorStr, typeSignatureStr, annotationInfo);
         if (fieldName == null) {
-            throw new IllegalArgumentException();
+            throw new IllegalArgumentException("fieldName must not be null");
         }
-        this.declaringClassName = definingClassName;
-        this.name = fieldName;
-        this.modifiers = modifiers;
-        this.typeDescriptorStr = typeDescriptorStr;
-        this.typeSignatureStr = typeSignatureStr;
-
         this.constantInitializerValue = constantInitializerValue == null ? null
                 : new ObjectTypedValueWrapper(constantInitializerValue);
-        this.annotationInfo = annotationInfo == null || annotationInfo.isEmpty() ? null : annotationInfo;
+        this.typeAnnotationDecorators = typeAnnotationDecorators;
     }
 
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Get the name of the field.
-     *
-     * @return The name of the field.
+     * Deprecated -- use {@link #getModifiersStr()} instead.
+     * 
+     * @deprecated Use {@link #getModifiersStr()} instead.
+     * @return The field modifiers, as a string.
      */
-    @Override
-    public String getName() {
-        return name;
+    @Deprecated
+    public String getModifierStr() {
+        return getModifiersStr();
     }
-
-    /**
-     * Get the {@link ClassInfo} object for the declaring class (i.e. the class that declares this field).
-     *
-     * @return The {@link ClassInfo} object for the declaring class (i.e. the class that declares this field), or
-     *         null if the class representing the type of the field was not encountered during scanning.
-     */
-    @Override
-    public ClassInfo getClassInfo() {
-        return super.getClassInfo();
-    }
-
-    // -------------------------------------------------------------------------------------------------------------
 
     /**
      * Get the field modifiers as a string, e.g. "public static final". For the modifier bits, call getModifiers().
      * 
      * @return The field modifiers, as a string.
      */
-    public String getModifierStr() {
+    @Override
+    public String getModifiersStr() {
         final StringBuilder buf = new StringBuilder();
         TypeUtils.modifiersToString(modifiers, ModifierType.FIELD, /* ignored */ false, buf);
         return buf.toString();
-    }
-
-    /**
-     * Returns true if this field is public.
-     * 
-     * @return True if the field is public.
-     */
-    public boolean isPublic() {
-        return Modifier.isPublic(modifiers);
-    }
-
-    /**
-     * Returns true if this field is static.
-     * 
-     * @return True if the field is static.
-     */
-    public boolean isStatic() {
-        return Modifier.isStatic(modifiers);
-    }
-
-    /**
-     * Returns true if this field is final.
-     * 
-     * @return True if the field is final.
-     */
-    public boolean isFinal() {
-        return Modifier.isFinal(modifiers);
     }
 
     /**
@@ -188,12 +132,12 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
     }
 
     /**
-     * Returns the modifier bits for the field.
+     * Returns true if this field is an enum constant.
      * 
-     * @return The modifier bits.
+     * @return True if the field is an enum constant.
      */
-    public int getModifiers() {
-        return modifiers;
+    public boolean isEnum() {
+        return (modifiers & 0x4000) != 0;
     }
 
     /**
@@ -202,29 +146,27 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      * 
      * @return The parsed type descriptor string for the field.
      */
+    @Override
     public TypeSignature getTypeDescriptor() {
-        if (typeDescriptorStr == null) {
-            return null;
-        }
-        if (typeDescriptor == null) {
-            try {
-                typeDescriptor = TypeSignature.parse(typeDescriptorStr, declaringClassName);
-                typeDescriptor.setScanResult(scanResult);
-            } catch (final ParseException e) {
-                throw new IllegalArgumentException(e);
+        synchronized (this) {
+            if (typeDescriptorStr == null) {
+                return null;
             }
+            if (typeDescriptor == null) {
+                try {
+                    typeDescriptor = TypeSignature.parse(typeDescriptorStr, declaringClassName);
+                    typeDescriptor.setScanResult(scanResult);
+                    if (typeAnnotationDecorators != null) {
+                        for (final TypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                            decorator.decorate(typeDescriptor);
+                        }
+                    }
+                } catch (final ParseException e) {
+                    throw new IllegalArgumentException(e);
+                }
+            }
+            return typeDescriptor;
         }
-        return typeDescriptor;
-    }
-
-    /**
-     * Returns the type descriptor string for the field, which will not include type parameters. If you need generic
-     * type parameters, call {@link #getTypeSignatureStr()} instead.
-     * 
-     * @return The type descriptor string for the field.
-     */
-    public String getTypeDescriptorStr() {
-        return typeDescriptorStr;
     }
 
     /**
@@ -233,31 +175,38 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      * instead.
      * 
      * @return The parsed type signature for the field, or null if not available.
+     * @throws IllegalArgumentException
+     *             if the field type signature cannot be parsed (this should only be thrown in the case of classfile
+     *             corruption, or a compiler bug that causes an invalid type signature to be written to the
+     *             classfile).
      */
+    @Override
     public TypeSignature getTypeSignature() {
-        if (typeSignatureStr == null) {
-            return null;
-        }
-        if (typeSignature == null) {
-            try {
-                typeSignature = TypeSignature.parse(typeSignatureStr, declaringClassName);
-                typeSignature.setScanResult(scanResult);
-            } catch (final ParseException e) {
-                throw new IllegalArgumentException(e);
+        synchronized (this) {
+            if (typeSignatureStr == null) {
+                return null;
             }
+            if (typeSignature == null) {
+                try {
+                    typeSignature = TypeSignature.parse(typeSignatureStr, declaringClassName);
+                    typeSignature.setScanResult(scanResult);
+                    if (typeAnnotationDecorators != null) {
+                        for (final TypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                            decorator.decorate(typeSignature);
+                        }
+                    }
+                } catch (final ParseException e) {
+                    throw new IllegalArgumentException(
+                            "Invalid type signature for field " + getClassName() + "." + getName()
+                                    + (getClassInfo() != null
+                                            ? " in classpath element " + getClassInfo().getClasspathElementURI()
+                                            : "")
+                                    + " : " + typeSignatureStr,
+                            e);
+                }
+            }
+            return typeSignature;
         }
-        return typeSignature;
-    }
-
-    /**
-     * Returns the type signature string for the field, possibly including type parameters. If this returns null,
-     * indicating that no type signature information is available for this field, call
-     * {@link #getTypeDescriptorStr()} instead.
-     * 
-     * @return The type signature string for the field, or null if not available.
-     */
-    public String getTypeSignatureStr() {
-        return typeSignatureStr;
     }
 
     /**
@@ -268,29 +217,18 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      * @return The parsed type signature for the field, or if not available, the parsed type descriptor for the
      *         field.
      */
+    @Override
     public TypeSignature getTypeSignatureOrTypeDescriptor() {
-        final TypeSignature typeSig = getTypeSignature();
-        if (typeSig != null) {
-            return typeSig;
-        } else {
-            return getTypeDescriptor();
+        TypeSignature typeSig = null;
+        try {
+            typeSig = getTypeSignature();
+            if (typeSig != null) {
+                return typeSig;
+            }
+        } catch (final Exception e) {
+            // Ignore
         }
-    }
-
-    /**
-     * Returns the type signature string for the field, possibly including type parameters. If the type signature
-     * string is null, indicating that no type signature information is available for this field, returns the type
-     * descriptor string instead.
-     * 
-     * @return The type signature string for the field, or if not available, the type descriptor string for the
-     *         method.
-     */
-    public String getTypeSignatureOrTypeDescriptorStr() {
-        if (typeSignatureStr != null) {
-            return typeSignatureStr;
-        } else {
-            return typeDescriptorStr;
-        }
+        return getTypeDescriptor();
     }
 
     /**
@@ -312,58 +250,6 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
         return constantInitializerValue == null ? null : constantInitializerValue.get();
     }
 
-    /**
-     * Get a list of annotations on this field, along with any annotation parameter values, wrapped in
-     * {@link AnnotationInfo} objects.
-     * 
-     * @return A list of annotations on this field, along with any annotation parameter values, wrapped in
-     *         {@link AnnotationInfo} objects, or the empty list if none.
-     */
-    public AnnotationInfoList getAnnotationInfo() {
-        if (!scanResult.scanSpec.enableAnnotationInfo) {
-            throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
-        }
-        return annotationInfo == null ? AnnotationInfoList.EMPTY_LIST
-                : AnnotationInfoList.getIndirectAnnotations(annotationInfo, /* annotatedClass = */ null);
-    }
-
-    /**
-     * Get a the named non-{@link Repeatable} annotation on this field, or null if the field does not have the named
-     * annotation. (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable} annotations.)
-     * 
-     * @param annotationName
-     *            The annotation name.
-     * @return An {@link AnnotationInfo} object representing the named annotation on this field, or null if the
-     *         field does not have the named annotation.
-     */
-    public AnnotationInfo getAnnotationInfo(final String annotationName) {
-        return getAnnotationInfo().get(annotationName);
-    }
-
-    /**
-     * Get a the named {@link Repeatable} annotation on this field, or the empty list if the field does not have the
-     * named annotation.
-     * 
-     * @param annotationName
-     *            The annotation name.
-     * @return An {@link AnnotationInfoList} of all instances of the named annotation on this field, or the empty
-     *         list if the field does not have the named annotation.
-     */
-    public AnnotationInfoList getAnnotationInfoRepeatable(final String annotationName) {
-        return getAnnotationInfo().getRepeatable(annotationName);
-    }
-
-    /**
-     * Check if the field has a given named annotation.
-     *
-     * @param annotationName
-     *            The name of an annotation.
-     * @return true if this field has the named annotation.
-     */
-    public boolean hasAnnotation(final String annotationName) {
-        return getAnnotationInfo().containsName(annotationName);
-    }
-
     // -------------------------------------------------------------------------------------------------------------
 
     /**
@@ -371,7 +257,7 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      * 
      * @return The {@link Field} reference for this field.
      * @throws IllegalArgumentException
-     *             if the field does not exist.
+     *             if the class can't be loaded or the field does not exist.
      */
     public Field loadClassAndGetField() throws IllegalArgumentException {
         try {
@@ -403,17 +289,6 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
 
     // -------------------------------------------------------------------------------------------------------------
 
-    /**
-     * Returns the name of the declaring class, so that super.getClassInfo() returns the {@link ClassInfo} object
-     * for the declaring class.
-     *
-     * @return the name of the declaring class.
-     */
-    @Override
-    protected String getClassName() {
-        return declaringClassName;
-    }
-
     /* (non-Javadoc)
      * @see io.github.classgraph.ScanResultObject#setScanResult(io.github.classgraph.ScanResult)
      */
@@ -443,18 +318,32 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
      */
     @Override
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
-        final TypeSignature methodSig = getTypeSignature();
-        if (methodSig != null) {
-            methodSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
+        try {
+            final TypeSignature fieldSig = getTypeSignature();
+            if (fieldSig != null) {
+                fieldSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+            }
+        } catch (final IllegalArgumentException e) {
+            if (log != null) {
+                log.log("Illegal type signature for field " + getClassName() + "." + getName() + ": "
+                        + getTypeSignatureStr());
+            }
         }
-        final TypeSignature methodDesc = getTypeDescriptor();
-        if (methodDesc != null) {
-            methodDesc.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+        try {
+            final TypeSignature fieldDesc = getTypeDescriptor();
+            if (fieldDesc != null) {
+                fieldDesc.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+            }
+        } catch (final IllegalArgumentException e) {
+            if (log != null) {
+                log.log("Illegal type descriptor for field " + getClassName() + "." + getName() + ": "
+                        + getTypeDescriptorStr());
+            }
         }
         if (annotationInfo != null) {
             for (final AnnotationInfo ai : annotationInfo) {
-                ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+                ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
             }
         }
     }
@@ -505,33 +394,32 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
         return name.compareTo(other.name);
     }
 
-    /* (non-Javadoc)
-     * @see java.lang.Object#toString()
-     */
-    @Override
-    public String toString() {
-        final StringBuilder buf = new StringBuilder();
+    // -------------------------------------------------------------------------------------------------------------
 
+    void toString(final boolean includeModifiers, final boolean useSimpleNames, final StringBuilder buf) {
         if (annotationInfo != null) {
             for (final AnnotationInfo annotation : annotationInfo) {
-                if (buf.length() > 0) {
+                // There can be a paren in the previous position if this field is a record parameter
+                if (buf.length() > 0 && buf.charAt(buf.length() - 1) != ' '
+                        && buf.charAt(buf.length() - 1) != '(') {
                     buf.append(' ');
                 }
-                buf.append(annotation.toString());
+                annotation.toString(useSimpleNames, buf);
             }
         }
 
-        if (modifiers != 0) {
-            if (buf.length() > 0) {
+        if (modifiers != 0 && includeModifiers) {
+            if (buf.length() > 0 && buf.charAt(buf.length() - 1) != ' ' && buf.charAt(buf.length() - 1) != '(') {
                 buf.append(' ');
             }
             TypeUtils.modifiersToString(modifiers, ModifierType.FIELD, /* ignored */ false, buf);
         }
 
-        if (buf.length() > 0) {
+        if (buf.length() > 0 && buf.charAt(buf.length() - 1) != ' ' && buf.charAt(buf.length() - 1) != '(') {
             buf.append(' ');
         }
-        buf.append(getTypeSignatureOrTypeDescriptor().toString());
+        final TypeSignature typeSig = getTypeSignatureOrTypeDescriptor();
+        typeSig.toStringInternal(useSimpleNames, /* annotationsToExclude = */ annotationInfo, buf);
 
         buf.append(' ');
         buf.append(name);
@@ -545,10 +433,13 @@ public class FieldInfo extends ScanResultObject implements Comparable<FieldInfo>
                 buf.append('\'').append(((Character) val).toString().replace("\\", "\\\\").replaceAll("'", "\\'"))
                         .append('\'');
             } else {
-                buf.append(val.toString());
+                buf.append(val == null ? "null" : val.toString());
             }
         }
+    }
 
-        return buf.toString();
+    @Override
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
+        toString(true, useSimpleNames, buf);
     }
 }

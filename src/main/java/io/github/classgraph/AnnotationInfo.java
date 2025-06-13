@@ -40,7 +40,8 @@ import java.util.Map;
 import java.util.Map.Entry;
 import java.util.Set;
 
-import nonapi.io.github.classgraph.utils.ReflectionUtils;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
+import nonapi.io.github.classgraph.utils.LogNode;
 
 /** Holds metadata about a specific annotation instance on a class, method, method parameter or field. */
 public class AnnotationInfo extends ScanResultObject implements Comparable<AnnotationInfo>, HasName {
@@ -113,24 +114,28 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
     /**
      * Get the parameter values.
      *
+     * @param includeDefaultValues
+     *            if true, include default values for any annotation parameter value that is missing.
      * @return The parameter values of this annotation, including any default parameter values inherited from the
-     *         annotation class definition, or the empty list if none.
+     *         annotation class definition (if requested), or the empty list if none.
      */
-    public AnnotationParameterValueList getParameterValues() {
+    public AnnotationParameterValueList getParameterValues(final boolean includeDefaultValues) {
+        final ClassInfo classInfo = getClassInfo();
+        if (classInfo == null) {
+            // ClassInfo has not yet been set, just return values without defaults
+            // (happens when trying to log AnnotationInfo during scanning, before ScanResult is available)
+            return annotationParamValues == null ? AnnotationParameterValueList.EMPTY_LIST : annotationParamValues;
+        }
+        // Lazily convert any Object[] arrays of boxed types to primitive arrays
+        if (annotationParamValues != null && !annotationParamValuesHasBeenConvertedToPrimitive) {
+            annotationParamValues.convertWrapperArraysToPrimitiveArrays(classInfo);
+            annotationParamValuesHasBeenConvertedToPrimitive = true;
+        }
+        if (!includeDefaultValues) {
+            // Don't include defaults
+            return annotationParamValues == null ? AnnotationParameterValueList.EMPTY_LIST : annotationParamValues;
+        }
         if (annotationParamValuesWithDefaults == null) {
-            final ClassInfo classInfo = getClassInfo();
-            if (classInfo == null) {
-                // ClassInfo has not yet been set, just return values without defaults
-                // (happens when trying to log AnnotationInfo during scanning, before ScanResult is available)
-                return annotationParamValues == null ? AnnotationParameterValueList.EMPTY_LIST
-                        : annotationParamValues;
-            }
-
-            // Lazily convert any Object[] arrays of boxed types to primitive arrays
-            if (annotationParamValues != null && !annotationParamValuesHasBeenConvertedToPrimitive) {
-                annotationParamValues.convertWrapperArraysToPrimitiveArrays(classInfo);
-                annotationParamValuesHasBeenConvertedToPrimitive = true;
-            }
             if (classInfo.annotationDefaultParamValues != null
                     && !classInfo.annotationDefaultParamValuesHasBeenConvertedToPrimitive) {
                 classInfo.annotationDefaultParamValues.convertWrapperArraysToPrimitiveArrays(classInfo);
@@ -192,6 +197,16 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
         return annotationParamValuesWithDefaults;
     }
 
+    /**
+     * Get the parameter values.
+     *
+     * @return The parameter values of this annotation, including any default parameter values inherited from the
+     *         annotation class definition, or the empty list if none.
+     */
+    public AnnotationParameterValueList getParameterValues() {
+        return getParameterValues(true);
+    }
+
     // -------------------------------------------------------------------------------------------------------------
 
     /**
@@ -227,11 +242,11 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
      */
     @Override
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
-        super.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
+        super.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
         if (annotationParamValues != null) {
             for (final AnnotationParameterValue annotationParamValue : annotationParamValues) {
-                annotationParamValue.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+                annotationParamValue.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
             }
         }
     }
@@ -273,7 +288,7 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
     public Annotation loadClassAndInstantiate() {
         final Class<? extends Annotation> annotationClass = getClassInfo().loadClass(Annotation.class);
         return (Annotation) Proxy.newProxyInstance(annotationClass.getClassLoader(),
-                new Class[] { annotationClass }, new AnnotationInvocationHandler(annotationClass, this));
+                new Class<?>[] { annotationClass }, new AnnotationInvocationHandler(annotationClass, this));
     }
 
     /** {@link InvocationHandler} for dynamically instantiating an {@link Annotation} object. */
@@ -308,7 +323,7 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
                 if (instantiatedValue == null) {
                     // Annotations cannot contain null values
                     throw new IllegalArgumentException("Got null value for annotation parameter " + apv.getName()
-                            + " of annotation " + annotationInfo.getName());
+                            + " of annotation " + annotationInfo.name);
                 }
                 this.annotationParameterValuesInstantiated.put(apv.getName(), instantiatedValue);
             }
@@ -336,11 +351,14 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
                     } else if (!annotationClass.isInstance(args[0])) {
                         return false;
                     }
+                    final ReflectionUtils reflectionUtils = annotationInfo.scanResult == null
+                            ? new ReflectionUtils()
+                            : annotationInfo.scanResult.reflectionUtils;
                     for (final Entry<String, Object> ent : annotationParameterValuesInstantiated.entrySet()) {
                         final String paramName = ent.getKey();
                         final Object paramVal = ent.getValue();
-                        final Object otherParamVal = ReflectionUtils.invokeMethod(args[0], paramName,
-                                /* throwException = */ false);
+                        final Object otherParamVal = reflectionUtils.invokeMethod(/* throwException = */ false,
+                                args[0], paramName);
                         if ((paramVal == null) != (otherParamVal == null)) {
                             // Annotation values should never be null, but just to be safe
                             return false;
@@ -466,7 +484,7 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
      */
     @Override
     public int compareTo(final AnnotationInfo o) {
-        final int diff = getName().compareTo(o.getName());
+        final int diff = this.name.compareTo(o.name);
         if (diff != 0) {
             return diff;
         }
@@ -477,8 +495,8 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
         } else if (o.annotationParamValues == null) {
             return 1;
         } else {
-            for (int i = 0, max = Math.max(annotationParamValues.size(),
-                    o.annotationParamValues.size()); i < max; i++) {
+            for (int i = 0,
+                    max = Math.max(annotationParamValues.size(), o.annotationParamValues.size()); i < max; i++) {
                 if (i >= annotationParamValues.size()) {
                     return -1;
                 } else if (i >= o.annotationParamValues.size()) {
@@ -513,7 +531,7 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
      */
     @Override
     public int hashCode() {
-        int h = getName().hashCode();
+        int h = name.hashCode();
         if (annotationParamValues != null) {
             for (final AnnotationParameterValue e : annotationParamValues) {
                 h = h * 7 + e.getName().hashCode() * 3 + e.getValue().hashCode();
@@ -522,14 +540,9 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
         return h;
     }
 
-    /**
-     * Render as a string, into a StringBuilder buffer.
-     * 
-     * @param buf
-     *            The buffer.
-     */
-    void toString(final StringBuilder buf) {
-        buf.append('@').append(getName());
+    @Override
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
+        buf.append('@').append(useSimpleNames ? ClassInfo.getSimpleName(name) : name);
         final AnnotationParameterValueList paramVals = getParameterValues();
         if (!paramVals.isEmpty()) {
             buf.append('(');
@@ -539,22 +552,12 @@ public class AnnotationInfo extends ScanResultObject implements Comparable<Annot
                 }
                 final AnnotationParameterValue paramVal = paramVals.get(i);
                 if (paramVals.size() > 1 || !"value".equals(paramVal.getName())) {
-                    paramVal.toString(buf);
+                    paramVal.toString(useSimpleNames, buf);
                 } else {
-                    paramVal.toStringParamValueOnly(buf);
+                    paramVal.toStringParamValueOnly(useSimpleNames, buf);
                 }
             }
             buf.append(')');
         }
-    }
-
-    /* (non-Javadoc)
-     * @see java.lang.Object#toString()
-     */
-    @Override
-    public String toString() {
-        final StringBuilder buf = new StringBuilder();
-        toString(buf);
-        return buf.toString();
     }
 }

@@ -44,13 +44,12 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
-import io.github.classgraph.ClassGraphException;
 import nonapi.io.github.classgraph.fileslice.ArraySlice;
 import nonapi.io.github.classgraph.fileslice.reader.RandomAccessReader;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 import nonapi.io.github.classgraph.utils.FileUtils;
-import nonapi.io.github.classgraph.utils.Join;
 import nonapi.io.github.classgraph.utils.LogNode;
+import nonapi.io.github.classgraph.utils.StringUtils;
 import nonapi.io.github.classgraph.utils.VersionFinder;
 
 /**
@@ -83,6 +82,9 @@ public class LogicalZipFile extends ZipFileSlice {
 
     /** If true, this is a JRE jar. */
     public boolean isJREJar;
+
+    /** If true, multi-release versions should not be stripped in resource names. */
+    private final boolean enableMultiReleaseVersions;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -149,9 +151,10 @@ public class LogicalZipFile extends ZipFileSlice {
      * @throws InterruptedException
      *             if the thread was interrupted.
      */
-    LogicalZipFile(final ZipFileSlice zipFileSlice, final NestedJarHandler nestedJarHandler, final LogNode log)
-            throws IOException, InterruptedException {
+    LogicalZipFile(final ZipFileSlice zipFileSlice, final NestedJarHandler nestedJarHandler, final LogNode log,
+            final boolean enableMultiReleaseVersions) throws IOException, InterruptedException {
         super(zipFileSlice);
+        this.enableMultiReleaseVersions = enableMultiReleaseVersions;
         readCentralDirectory(nestedJarHandler, log);
     }
 
@@ -225,7 +228,7 @@ public class LogicalZipFile extends ZipFileSlice {
                 val = buf.toString("UTF-8");
             } catch (final UnsupportedEncodingException e) {
                 // Should not happen
-                throw ClassGraphException.newClassGraphException("UTF-8 encoding unsupported", e);
+                throw new RuntimeException("UTF-8 encoding is not supported in your JRE", e);
             }
         }
         return new SimpleEntry<>(val.endsWith(" ") ? val.trim() : val, curr);
@@ -448,7 +451,7 @@ public class LogicalZipFile extends ZipFileSlice {
         // initially just try reading back a maximum of 32 characters.
         long eocdPos = -1;
         for (long i = slice.sliceLength - 22, iMin = slice.sliceLength - 22 - 32; i >= iMin && i >= 0L; --i) {
-            if (reader.readInt(i) == 0x06054b50) {
+            if (reader.readUnsignedInt(i) == 0x06054b50L) {
                 eocdPos = i;
                 break;
             }
@@ -467,7 +470,7 @@ public class LogicalZipFile extends ZipFileSlice {
                     /* inflatedLengthHint = */ 0L, nestedJarHandler)) {
                 final RandomAccessReader eocdReader = arraySlice.randomAccessReader();
                 for (long i = eocdBytes.length - 22L; i >= 0L; --i) {
-                    if (eocdReader.readInt(i) == 0x06054b50) {
+                    if (eocdReader.readUnsignedInt(i) == 0x06054b50L) {
                         eocdPos = i + readStartOff;
                         break;
                     }
@@ -483,26 +486,22 @@ public class LogicalZipFile extends ZipFileSlice {
             throw new IOException("Multi-disk jarfiles not supported: " + getPath());
         }
         long cenSize = reader.readUnsignedInt(eocdPos + 12);
-        if (cenSize > eocdPos) {
-            throw new IOException(
-                    "Central directory size out of range: " + cenSize + " vs. " + eocdPos + ": " + getPath());
-        }
         long cenOff = reader.readUnsignedInt(eocdPos + 16);
         long cenPos = eocdPos - cenSize;
 
         // Check for Zip64 End Of Central Directory Locator record
         final long zip64cdLocIdx = eocdPos - 20;
-        if (zip64cdLocIdx >= 0 && reader.readInt(zip64cdLocIdx) == 0x07064b50) {
-            if (reader.readInt(zip64cdLocIdx + 4) > 0 || reader.readInt(zip64cdLocIdx + 16) > 1) {
+        if (zip64cdLocIdx >= 0 && reader.readUnsignedInt(zip64cdLocIdx) == 0x07064b50L) {
+            if (reader.readUnsignedInt(zip64cdLocIdx + 4) > 0 || reader.readUnsignedInt(zip64cdLocIdx + 16) > 1) {
                 throw new IOException("Multi-disk jarfiles not supported: " + getPath());
             }
             final long eocdPos64 = reader.readLong(zip64cdLocIdx + 8);
-            if (reader.readInt(eocdPos64) != 0x06064b50) {
+            if (reader.readUnsignedInt(eocdPos64) != 0x06064b50L) {
                 throw new IOException("Zip64 central directory at location " + eocdPos64
                         + " does not have Zip64 central directory header: " + getPath());
             }
             final long numEnt64 = reader.readLong(eocdPos64 + 24);
-            if (reader.readInt(eocdPos64 + 16) > 0 || reader.readInt(eocdPos64 + 20) > 0
+            if (reader.readUnsignedInt(eocdPos64 + 16) > 0 || reader.readUnsignedInt(eocdPos64 + 20) > 0
                     || numEnt64 != reader.readLong(eocdPos64 + 32)) {
                 throw new IOException("Multi-disk jarfiles not supported: " + getPath());
             }
@@ -531,6 +530,11 @@ public class LogicalZipFile extends ZipFileSlice {
                 throw new IOException(
                         "Mismatch in central directory offset: " + cenOff + " vs. " + cenOff64 + ": " + getPath());
             }
+        }
+
+        if (cenSize > eocdPos) {
+            throw new IOException(
+                    "Central directory size out of range: " + cenSize + " vs. " + eocdPos + ": " + getPath());
         }
 
         // Get offset of first local file header
@@ -566,10 +570,10 @@ public class LogicalZipFile extends ZipFileSlice {
             // numEnt and numEnt64 were inconsistent -- manually count entries
             numEnt = 0;
             for (long entOff = 0; entOff + 46 <= cenSize;) {
-                final int sig = cenReader.readInt(entOff);
-                if (sig != 0x02014b50) {
-                    throw new IOException("Invalid central directory signature: 0x" + Integer.toString(sig, 16)
-                            + ": " + getPath());
+                final long sig = cenReader.readUnsignedInt(entOff);
+                if (sig != 0x02014b50L) {
+                    throw new IOException("Invalid central directory signature: 0x"
+                            + Integer.toString((int) sig, 16) + ": " + getPath());
                 }
                 final int filenameLen = cenReader.readUnsignedShort(entOff + 28);
                 final int extraFieldLen = cenReader.readUnsignedShort(entOff + 30);
@@ -598,10 +602,10 @@ public class LogicalZipFile extends ZipFileSlice {
         try {
             int entSize = 0;
             for (long entOff = 0; entOff + 46 <= cenSize; entOff += entSize) {
-                final int sig = cenReader.readInt(entOff);
-                if (sig != 0x02014b50) {
-                    throw new IOException("Invalid central directory signature: 0x" + Integer.toString(sig, 16)
-                            + ": " + getPath());
+                final long sig = cenReader.readUnsignedInt(entOff);
+                if (sig != 0x02014b50L) {
+                    throw new IOException("Invalid central directory signature: 0x"
+                            + Integer.toString((int) sig, 16) + ": " + getPath());
                 }
                 final int filenameLen = cenReader.readUnsignedShort(entOff + 28);
                 final int extraFieldLen = cenReader.readUnsignedShort(entOff + 30);
@@ -652,7 +656,7 @@ public class LogicalZipFile extends ZipFileSlice {
                 // Get external file attributes
                 final int fileAttributes = cenReader.readUnsignedShort(entOff + 40);
 
-                long pos = cenReader.readInt(entOff + 42);
+                long pos = cenReader.readUnsignedInt(entOff + 42);
 
                 // Check for Zip64 header in extra fields
                 // See:
@@ -701,7 +705,7 @@ public class LogicalZipFile extends ZipFileSlice {
 
                         } else if (tag == 0x5455 && size >= 5) {
                             // Extended Unix timestamp
-                            final byte bits = cenReader.readByte(tagOff + 4 + 0);
+                            final int bits = cenReader.readUnsignedByte(tagOff + 4 + 0);
                             if ((bits & 1) == 1 && size >= 5 + 8) {
                                 lastModifiedMillis = cenReader.readLong(tagOff + 4 + 1) * 1000L;
                             }
@@ -716,7 +720,7 @@ public class LogicalZipFile extends ZipFileSlice {
 
                         } else if (tag == 0x7075) {
                             // Info-ZIP Unicode path extra field
-                            final byte version = cenReader.readByte(tagOff + 4 + 0);
+                            final int version = cenReader.readUnsignedByte(tagOff + 4 + 0);
                             if (version != 1) {
                                 throw new IOException("Unknown Unicode entry name format " + version
                                         + " in extra field: " + entryNameSanitized);
@@ -742,14 +746,32 @@ public class LogicalZipFile extends ZipFileSlice {
                     lastModifiedDateMSDOS = cenReader.readUnsignedShort(entOff + 14);
                 }
 
-                if (compressedSize < 0 || pos < 0) {
+                if (compressedSize < 0) {
+                    if (log != null) {
+                        log.log("Skipping zip entry with invalid compressed size (" + compressedSize + "): "
+                                + entryNameSanitized);
+                    }
+                    continue;
+                }
+                if (uncompressedSize < 0) {
+                    if (log != null) {
+                        log.log("Skipping zip entry with invalid uncompressed size (" + uncompressedSize + "): "
+                                + entryNameSanitized);
+                    }
+                    continue;
+                }
+                if (pos < 0) {
+                    if (log != null) {
+                        log.log("Skipping zip entry with invalid pos (" + pos + "): " + entryNameSanitized);
+                    }
                     continue;
                 }
 
                 final long locHeaderPos = locPos + pos;
                 if (locHeaderPos < 0) {
                     if (log != null) {
-                        log.log("Skipping zip entry with invalid loc header position: " + entryNameSanitized);
+                        log.log("Skipping zip entry with invalid loc header position (" + locHeaderPos + "): "
+                                + entryNameSanitized);
                     }
                     continue;
                 }
@@ -763,7 +785,7 @@ public class LogicalZipFile extends ZipFileSlice {
                 // Add zip entry
                 final FastZipEntry entry = new FastZipEntry(this, locHeaderPos, entryNameSanitized, isDeflated,
                         compressedSize, uncompressedSize, lastModifiedMillis, lastModifiedTimeMSDOS,
-                        lastModifiedDateMSDOS, fileAttributes);
+                        lastModifiedDateMSDOS, fileAttributes, enableMultiReleaseVersions);
                 entries.add(entry);
 
                 // Record manifest entry
@@ -803,7 +825,8 @@ public class LogicalZipFile extends ZipFileSlice {
                     }
                     final List<Integer> versionsFoundSorted = new ArrayList<>(versionsFound);
                     CollectionUtils.sortIfNotEmpty(versionsFoundSorted);
-                    log.log("This is a multi-release jar, with versions: " + Join.join(", ", versionsFoundSorted));
+                    log.log("This is a multi-release jar, with versions: "
+                            + StringUtils.join(", ", versionsFoundSorted));
                 }
 
                 // Sort in decreasing order of version in preparation for version masking

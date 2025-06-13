@@ -28,50 +28,32 @@
  */
 package io.github.classgraph;
 
+import java.lang.annotation.Annotation;
 import java.lang.annotation.Repeatable;
+import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
 import io.github.classgraph.ClassInfo.RelType;
+import io.github.classgraph.Classfile.MethodTypeAnnotationDecorator;
 import nonapi.io.github.classgraph.types.ParseException;
 import nonapi.io.github.classgraph.types.TypeUtils;
 import nonapi.io.github.classgraph.types.TypeUtils.ModifierType;
+import nonapi.io.github.classgraph.utils.Assert;
+import nonapi.io.github.classgraph.utils.LogNode;
 
 /**
  * Holds metadata about methods of a class encountered during a scan. All values are taken directly out of the
  * classfile for the class.
  */
-public class MethodInfo extends ScanResultObject implements Comparable<MethodInfo>, HasName {
-    /** Defining class name. */
-    private String declaringClassName;
-
-    /** Method name. */
-    private String name;
-
-    /** Method modifiers. */
-    private int modifiers;
-
-    /** Method annotations. */
-    AnnotationInfoList annotationInfo;
-
-    /**
-     * The JVM-internal type descriptor (missing type parameters, but including types for synthetic and mandated
-     * method parameters).
-     */
-    private String typeDescriptorStr;
-
+public class MethodInfo extends ClassMemberInfo implements Comparable<MethodInfo> {
     /** The parsed type descriptor. */
     private transient MethodTypeSignature typeDescriptor;
-
-    /**
-     * The type signature (may have type parameter information included, if present and available). Method parameter
-     * types are unaligned.
-     */
-    private String typeSignatureStr;
 
     /** The parsed type signature (or null if none). Method parameter types are unaligned. */
     private transient MethodTypeSignature typeSignature;
@@ -96,6 +78,19 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
 
     /** True if this method has a body. */
     private boolean hasBody;
+
+    /** The minimum line number for the body of this method, or 0 if unknown. */
+    private int minLineNum;
+
+    /** The maximum line number for the body of this method, or 0 if unknown. */
+    private int maxLineNum;
+
+    /** The type annotation decorators for the {@link MethodTypeSignature} instance. */
+    private transient List<MethodTypeAnnotationDecorator> typeAnnotationDecorators;
+
+    private String[] thrownExceptionNames;
+
+    private transient ClassInfoList thrownExceptions;
 
     // -------------------------------------------------------------------------------------------------------------
 
@@ -127,23 +122,30 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      *            The parameter {@link AnnotationInfo}.
      * @param hasBody
      *            True if this method has a body.
+     * @param minLineNum
+     *            The minimum line number for the body of this method, or 0 if unknown.
+     * @param maxLineNum
+     *            The maximum line number for the body of this method, or 0 if unknown.
+     * @param methodTypeAnnotationDecorators
+     *            Decorator lambdas for method type annotations.
+     * @param thrownExceptionNames
+     *            exceptions thrown by this method.
      */
     MethodInfo(final String definingClassName, final String methodName,
             final AnnotationInfoList methodAnnotationInfo, final int modifiers, final String typeDescriptorStr,
             final String typeSignatureStr, final String[] parameterNames, final int[] parameterModifiers,
-            final AnnotationInfo[][] parameterAnnotationInfo, final boolean hasBody) {
-        super();
-        this.declaringClassName = definingClassName;
-        this.name = methodName;
-        this.modifiers = modifiers;
-        this.typeDescriptorStr = typeDescriptorStr;
-        this.typeSignatureStr = typeSignatureStr;
+            final AnnotationInfo[][] parameterAnnotationInfo, final boolean hasBody, final int minLineNum,
+            final int maxLineNum, final List<MethodTypeAnnotationDecorator> methodTypeAnnotationDecorators,
+            final String[] thrownExceptionNames) {
+        super(definingClassName, methodName, modifiers, typeDescriptorStr, typeSignatureStr, methodAnnotationInfo);
         this.parameterNames = parameterNames;
         this.parameterModifiers = parameterModifiers;
         this.parameterAnnotationInfo = parameterAnnotationInfo;
-        this.annotationInfo = methodAnnotationInfo == null || methodAnnotationInfo.isEmpty() ? null
-                : methodAnnotationInfo;
         this.hasBody = hasBody;
+        this.minLineNum = minLineNum;
+        this.maxLineNum = maxLineNum;
+        this.typeAnnotationDecorators = methodTypeAnnotationDecorators;
+        this.thrownExceptionNames = thrownExceptionNames;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -160,34 +162,16 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
     }
 
     /**
-     * Returns the modifier bits for the method.
-     * 
-     * @return The modifier bits for the method.
-     */
-    public int getModifiers() {
-        return modifiers;
-    }
-
-    /**
      * Get the method modifiers as a String, e.g. "public static final". For the modifier bits, call
      * {@link #getModifiers()}.
      * 
      * @return The modifiers for the method, as a String.
      */
+    @Override
     public String getModifiersStr() {
         final StringBuilder buf = new StringBuilder();
         TypeUtils.modifiersToString(modifiers, ModifierType.METHOD, isDefault(), buf);
         return buf.toString();
-    }
-
-    /**
-     * Get the {@link ClassInfo} object for the declaring class (i.e. the class that declares this method).
-     *
-     * @return The {@link ClassInfo} object for the declaring class (i.e. the class that declares this method).
-     */
-    @Override
-    public ClassInfo getClassInfo() {
-        return super.getClassInfo();
     }
 
     /**
@@ -196,26 +180,64 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      * 
      * @return The parsed type descriptor for the method.
      */
+    @Override
     public MethodTypeSignature getTypeDescriptor() {
-        if (typeDescriptor == null) {
-            try {
-                typeDescriptor = MethodTypeSignature.parse(typeDescriptorStr, declaringClassName);
-                typeDescriptor.setScanResult(scanResult);
-            } catch (final ParseException e) {
-                throw new IllegalArgumentException(e);
+        synchronized (this) {
+            if (typeDescriptor == null) {
+                try {
+                    typeDescriptor = MethodTypeSignature.parse(typeDescriptorStr, declaringClassName);
+                    typeDescriptor.setScanResult(scanResult);
+                    if (typeAnnotationDecorators != null) {
+                        // It is possible that there are extra implicit params added at the beginning of the
+                        // parameter list that type annotations don't take into account. Assume that the
+                        // type signature has the correct number of parameters, and temporarily remove any
+                        // implicit prefix parameters during the type decoration process. See getParameterInfo().
+                        int sigNumParam = 0;
+                        final MethodTypeSignature sig = getTypeSignature();
+                        if (sig == null) {
+                            // There is no type signature -- run type annotation decorators on descriptor
+                            for (final MethodTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                                decorator.decorate(typeDescriptor);
+                            }
+                        } else {
+                            // Determine how many extra implicit params there are
+                            sigNumParam = sig.getParameterTypeSignatures().size();
+                            final int descNumParam = typeDescriptor.getParameterTypeSignatures().size();
+                            final int numImplicitPrefixParams = descNumParam - sigNumParam;
+                            if (numImplicitPrefixParams < 0) {
+                                // Sanity check -- should not happen
+                                throw new IllegalArgumentException(
+                                        "Fewer params in method type descriptor than in method type signature");
+                            } else if (numImplicitPrefixParams == 0) {
+                                // There are no implicit prefix params --
+                                // run type annotation decorators on descriptor
+                                for (final MethodTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                                    decorator.decorate(typeDescriptor);
+                                }
+                            } else {
+                                // There are implicit prefix params -- strip them temporarily from type descriptor,
+                                // then run decorators, then add them back again
+                                final List<TypeSignature> paramSigs = typeDescriptor.getParameterTypeSignatures();
+                                final List<TypeSignature> strippedParamSigs = paramSigs.subList(0,
+                                        numImplicitPrefixParams);
+                                for (int i = 0; i < numImplicitPrefixParams; i++) {
+                                    paramSigs.remove(0);
+                                }
+                                for (final MethodTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                                    decorator.decorate(typeDescriptor);
+                                }
+                                for (int i = numImplicitPrefixParams - 1; i >= 0; --i) {
+                                    paramSigs.add(0, strippedParamSigs.get(i));
+                                }
+                            }
+                        }
+                    }
+                } catch (final ParseException e) {
+                    throw new IllegalArgumentException(e);
+                }
             }
+            return typeDescriptor;
         }
-        return typeDescriptor;
-    }
-
-    /**
-     * Returns the type descriptor string for the method, which will not include type parameters. If you need
-     * generic type parameters, call {@link #getTypeSignatureStr()} instead.
-     * 
-     * @return The type descriptor string for the method.
-     */
-    public String getTypeDescriptorStr() {
-        return typeDescriptorStr;
     }
 
     /**
@@ -224,28 +246,35 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      * instead.
      * 
      * @return The parsed type signature for the method, or null if not available.
+     * @throws IllegalArgumentException
+     *             if the method type signature cannot be parsed (this should only be thrown in the case of
+     *             classfile corruption, or a compiler bug that causes an invalid type signature to be written to
+     *             the classfile).
      */
+    @Override
     public MethodTypeSignature getTypeSignature() {
-        if (typeSignature == null && typeSignatureStr != null) {
-            try {
-                typeSignature = MethodTypeSignature.parse(typeSignatureStr, declaringClassName);
-                typeSignature.setScanResult(scanResult);
-            } catch (final ParseException e) {
-                throw new IllegalArgumentException(e);
+        synchronized (this) {
+            if (typeSignature == null && typeSignatureStr != null) {
+                try {
+                    typeSignature = MethodTypeSignature.parse(typeSignatureStr, declaringClassName);
+                    typeSignature.setScanResult(scanResult);
+                    if (typeAnnotationDecorators != null) {
+                        for (final MethodTypeAnnotationDecorator decorator : typeAnnotationDecorators) {
+                            decorator.decorate(typeSignature);
+                        }
+                    }
+                } catch (final ParseException e) {
+                    throw new IllegalArgumentException(
+                            "Invalid type signature for method " + getClassName() + "." + getName()
+                                    + (getClassInfo() != null
+                                            ? " in classpath element " + getClassInfo().getClasspathElementURI()
+                                            : "")
+                                    + " : " + typeSignatureStr,
+                            e);
+                }
             }
+            return typeSignature;
         }
-        return typeSignature;
-    }
-
-    /**
-     * Returns the type signature string for the method, possibly including type parameters. If this returns null,
-     * indicating that no type signature information is available for this method, call
-     * {@link #getTypeDescriptorStr()} instead.
-     * 
-     * @return The type signature string for the method, or null if not available.
-     */
-    public String getTypeSignatureStr() {
-        return typeSignatureStr;
     }
 
     /**
@@ -256,29 +285,48 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      * @return The parsed type signature for the method, or if not available, the parsed type descriptor for the
      *         method.
      */
+    @Override
     public MethodTypeSignature getTypeSignatureOrTypeDescriptor() {
-        final MethodTypeSignature typeSig = getTypeSignature();
-        if (typeSig != null) {
-            return typeSig;
-        } else {
-            return getTypeDescriptor();
+        MethodTypeSignature typeSig = null;
+        try {
+            typeSig = getTypeSignature();
+            if (typeSig != null) {
+                return typeSig;
+            }
+        } catch (final Exception e) {
+            // Ignore
+        }
+        return getTypeDescriptor();
+    }
+
+    /**
+     * Returns the list of exceptions thrown by the method, as a {@link ClassInfoList}.
+     * 
+     * @return The list of exceptions thrown by the method, as a {@link ClassInfoList} (the list may be empty).
+     */
+    public ClassInfoList getThrownExceptions() {
+        synchronized (this) {
+            if (thrownExceptions == null && thrownExceptionNames != null) {
+                thrownExceptions = new ClassInfoList(thrownExceptionNames.length);
+                for (final String thrownExceptionName : thrownExceptionNames) {
+                    final ClassInfo classInfo = scanResult.getClassInfo(thrownExceptionName);
+                    if (classInfo != null) {
+                        thrownExceptions.add(classInfo);
+                        classInfo.setScanResult(scanResult);
+                    }
+                }
+            }
+            return thrownExceptions == null ? ClassInfoList.EMPTY_LIST : thrownExceptions;
         }
     }
 
     /**
-     * Returns the type signature string for the method, possibly including type parameters. If the type signature
-     * string is null, indicating that no type signature information is available for this method, returns the type
-     * descriptor string instead.
+     * Returns the exceptions thrown by the method, as an array.
      * 
-     * @return The type signature string for the method, or if not available, the type descriptor string for the
-     *         method.
+     * @return The exceptions thrown by the method, as an array (the array may be empty).
      */
-    public String getTypeSignatureOrTypeDescriptorStr() {
-        if (typeSignatureStr != null) {
-            return typeSignatureStr;
-        } else {
-            return typeDescriptorStr;
-        }
+    public String[] getThrownExceptionNames() {
+        return thrownExceptionNames == null ? new String[0] : thrownExceptionNames;
     }
 
     // -------------------------------------------------------------------------------------------------------------
@@ -292,33 +340,6 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      */
     public boolean isConstructor() {
         return "<init>".equals(name);
-    }
-
-    /**
-     * Returns true if this method is public.
-     * 
-     * @return True if this method is public.
-     */
-    public boolean isPublic() {
-        return Modifier.isPublic(modifiers);
-    }
-
-    /**
-     * Returns true if this method is static.
-     * 
-     * @return True if this method is static.
-     */
-    public boolean isStatic() {
-        return Modifier.isStatic(modifiers);
-    }
-
-    /**
-     * Returns true if this method is final.
-     * 
-     * @return True if this method is final.
-     */
-    public boolean isFinal() {
-        return Modifier.isFinal(modifiers);
     }
 
     /**
@@ -340,15 +361,6 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
     }
 
     /**
-     * Returns true if this method is synthetic.
-     * 
-     * @return True if this is synthetic.
-     */
-    public boolean isSynthetic() {
-        return (modifiers & 0x1000) != 0;
-    }
-
-    /**
      * Returns true if this method is a varargs method.
      * 
      * @return True if this is a varargs method.
@@ -367,12 +379,48 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
     }
 
     /**
+     * Returns true if this method is abstract.
+     * 
+     * @return True if this method is abstract.
+     */
+    public boolean isAbstract() {
+        return Modifier.isAbstract(modifiers);
+    }
+
+    /**
+     * Returns true if this method is strict.
+     * 
+     * @return True if this method is strict.
+     */
+    public boolean isStrict() {
+        return Modifier.isStrict(modifiers);
+    }
+
+    /**
      * Returns true if this method has a body (i.e. has an implementation in the containing class).
      * 
      * @return True if this method has a body.
      */
     public boolean hasBody() {
         return hasBody;
+    }
+
+    /**
+     * The line number of the first non-empty line in the body of this method, or 0 if unknown.
+     * 
+     * @return The line number of the first non-empty line in the body of this method, or 0 if unknown.
+     */
+    public int getMinLineNum() {
+        return minLineNum;
+    }
+
+    /**
+     * The line number of the last non-empty line in the body of this method, or 0 if unknown.
+     * 
+     * @return The line number of the last non-empty line in the body of this method, or 0 if unknown.
+     */
+    public int getMaxLineNum() {
+        return maxLineNum;
     }
 
     /**
@@ -394,164 +442,168 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      * @return The {@link MethodParameterInfo} objects for the method parameters, one per parameter.
      */
     public MethodParameterInfo[] getParameterInfo() {
-        if (parameterInfo == null) {
-            // Get params from the type descriptor, and from the type signature if available
-            final List<TypeSignature> paramTypeDescriptors = getTypeDescriptor().getParameterTypeSignatures();
-            final List<TypeSignature> paramTypeSignatures = getTypeSignature() != null
-                    ? getTypeSignature().getParameterTypeSignatures()
-                    : null;
+        // Kotlin is very inconsistent about the arity of each of the parameter metadata types, see:
+        // https://github.com/classgraph/classgraph/issues/175#issuecomment-363031510
+        // As a workaround, we assume that any synthetic / mandated parameters must come first in the
+        // parameter list, when the arities don't match, and we right-align the metadata fields.
+        // This is probably the safest assumption across JVM languages, even though this convention
+        // is by no means the only possibility. (Unfortunately we can't just rely on the modifier
+        // bits to find synthetic / mandated parameters, because these bits are not always available,
+        // and even when they are, they don't always give the right alignment, at least for Kotlin-
+        // generated code).
 
-            // Figure out the number of params in the alignment (should be num params in type descriptor)
-            final int numParams = paramTypeDescriptors.size();
-            if (paramTypeSignatures != null && paramTypeSignatures.size() > numParams) {
-                // Should not happen
-                throw ClassGraphException.newClassGraphException(
-                        "typeSignatureParamTypes.size() > typeDescriptorParamTypes.size() for method "
-                                + declaringClassName + "." + name);
-            }
+        // Actually the Java spec says specifically: "The signature and descriptor of a given method
+        // or constructor may not correspond exactly, due to compiler-generated artifacts. In particular,
+        // the number of TypeSignatures that encode formal arguments in MethodTypeSignature may be less
+        // than the number of ParameterDescriptors in MethodDescriptor."
 
-            // Figure out number of other fields that need alignment, and check length for consistency 
-            final int otherParamMax = Math.max(parameterNames == null ? 0 : parameterNames.length,
-                    Math.max(parameterModifiers == null ? 0 : parameterModifiers.length,
-                            parameterAnnotationInfo == null ? 0 : parameterAnnotationInfo.length));
-            if (otherParamMax > numParams) {
-                // Should not happen
-                throw ClassGraphException.newClassGraphException("Type descriptor for method " + declaringClassName
-                        + "." + name + " has insufficient parameters");
-            }
+        // This was also triggered by an implicit param in Guava 28.2 (#660).
 
-            // Kotlin is very inconsistent about the arity of each of the parameter metadata types, see:
-            // https://github.com/classgraph/classgraph/issues/175#issuecomment-363031510
-            // As a workaround, we assume that any synthetic / mandated parameters must come first in the
-            // parameter list, when the arities don't match, and we right-align the metadata fields.
-            // This is probably the safest assumption across JVM languages, even though this convention
-            // is by no means the only possibility. (Unfortunately we can't just rely on the modifier
-            // bits to find synthetic / mandated parameters, because these bits are not always available,
-            // and even when they are, they don't always give the right alignment, at least for Kotlin-
-            // generated code).
+        synchronized (this) {
+            if (parameterInfo == null) {
+                // Get param type signatures from the type signature of the method
+                List<TypeSignature> paramTypeSignatures = null;
+                final MethodTypeSignature typeSig = getTypeSignature();
+                if (typeSig != null) {
+                    paramTypeSignatures = typeSig.getParameterTypeSignatures();
+                }
 
-            String[] paramNamesAligned = null;
-            if (parameterNames != null && numParams > 0) {
-                if (parameterNames.length == numParams) {
-                    // No alignment necessary
-                    paramNamesAligned = parameterNames;
-                } else {
-                    // Right-align when not the right length
-                    paramNamesAligned = new String[numParams];
-                    for (int i = 0, lenDiff = numParams - parameterNames.length; i < parameterNames.length; i++) {
-                        paramNamesAligned[lenDiff + i] = parameterNames[i];
+                // If there is no type signature (i.e. if this is not a generic method), fall back to the type
+                // descriptor (N.B. the type descriptor is basically junk, because the compiler may prepend
+                // `synthetic` and/or `bridge` parameters automatically, without providing any modifiers for
+                // the method, so that it is impossible to know how many parameters have been prepended --
+                // see #660.)
+                List<TypeSignature> paramTypeDescriptors = null;
+                try {
+                    final MethodTypeSignature typeDesc = getTypeDescriptor();
+                    if (typeDesc != null) {
+                        paramTypeDescriptors = typeDesc.getParameterTypeSignatures();
+                    }
+                } catch (final Exception e) {
+                    // Ignore any IllegalArgumentExceptions triggered when type annotations are not able to be
+                    /// aligned with parameters, when there is a `synthetic`, `bridge` or `mandated` parameter
+                    // added to the first parameter position.
+                }
+
+                // Find the max length of all the parameter information sources
+                int numParams = paramTypeSignatures == null ? 0 : paramTypeSignatures.size();
+                if (paramTypeDescriptors != null && paramTypeDescriptors.size() > numParams) {
+                    numParams = paramTypeDescriptors.size();
+                }
+                if (parameterNames != null && parameterNames.length > numParams) {
+                    numParams = parameterNames.length;
+                }
+                if (parameterModifiers != null && parameterModifiers.length > numParams) {
+                    numParams = parameterModifiers.length;
+                }
+                if (parameterAnnotationInfo != null && parameterAnnotationInfo.length > numParams) {
+                    numParams = parameterAnnotationInfo.length;
+                }
+
+                // "Right-align" all parameter info, i.e. assume that any automatically-added implicit parameters
+                // were added at the beginning of the parameter list, not the end.
+
+                String[] paramNamesAligned = null;
+                if (parameterNames != null && parameterNames.length > 0) {
+                    if (parameterNames.length == numParams) {
+                        // No alignment necessary
+                        paramNamesAligned = parameterNames;
+                    } else {
+                        // Right-align when not the right length
+                        paramNamesAligned = new String[numParams];
+                        for (int i = 0,
+                                lenDiff = numParams - parameterNames.length; i < parameterNames.length; i++) {
+                            paramNamesAligned[lenDiff + i] = parameterNames[i];
+                        }
                     }
                 }
-            }
-            int[] paramModifiersAligned = null;
-            if (parameterModifiers != null && numParams > 0) {
-                if (parameterModifiers.length == numParams) {
-                    // No alignment necessary
-                    paramModifiersAligned = parameterModifiers;
-                } else {
-                    // Right-align when not the right length
-                    paramModifiersAligned = new int[numParams];
-                    for (int i = 0, lenDiff = numParams
-                            - parameterModifiers.length; i < parameterModifiers.length; i++) {
-                        paramModifiersAligned[lenDiff + i] = parameterModifiers[i];
+                int[] paramModifiersAligned = null;
+                if (parameterModifiers != null && parameterModifiers.length > 0) {
+                    if (parameterModifiers.length == numParams) {
+                        // No alignment necessary
+                        paramModifiersAligned = parameterModifiers;
+                    } else {
+                        // Right-align when not the right length
+                        paramModifiersAligned = new int[numParams];
+                        for (int i = 0, lenDiff = numParams
+                                - parameterModifiers.length; i < parameterModifiers.length; i++) {
+                            paramModifiersAligned[lenDiff + i] = parameterModifiers[i];
+                        }
                     }
                 }
-            }
-            AnnotationInfo[][] paramAnnotationInfoAligned = null;
-            if (parameterAnnotationInfo != null && numParams > 0) {
-                if (parameterAnnotationInfo.length == numParams) {
-                    // No alignment necessary
-                    paramAnnotationInfoAligned = parameterAnnotationInfo;
-                } else {
-                    // Right-align when not the right length
-                    paramAnnotationInfoAligned = new AnnotationInfo[numParams][];
-                    for (int i = 0, lenDiff = numParams
-                            - parameterAnnotationInfo.length; i < parameterAnnotationInfo.length; i++) {
-                        paramAnnotationInfoAligned[lenDiff + i] = parameterAnnotationInfo[i];
+                AnnotationInfo[][] paramAnnotationInfoAligned = null;
+                if (parameterAnnotationInfo != null && parameterAnnotationInfo.length > 0) {
+                    if (parameterAnnotationInfo.length == numParams) {
+                        // No alignment necessary
+                        paramAnnotationInfoAligned = parameterAnnotationInfo;
+                    } else {
+                        // Right-align when not the right length
+                        paramAnnotationInfoAligned = new AnnotationInfo[numParams][];
+                        for (int i = 0, lenDiff = numParams
+                                - parameterAnnotationInfo.length; i < parameterAnnotationInfo.length; i++) {
+                            paramAnnotationInfoAligned[lenDiff + i] = parameterAnnotationInfo[i];
+                        }
                     }
                 }
-            }
-            List<TypeSignature> paramTypeSignaturesAligned = null;
-            if (paramTypeSignatures != null && numParams > 0) {
-                if (paramTypeSignatures.size() == paramTypeDescriptors.size()) {
-                    // No alignment necessary
-                    paramTypeSignaturesAligned = paramTypeSignatures;
-                } else {
-                    // Right-align when not the right length
-                    paramTypeSignaturesAligned = new ArrayList<>(numParams);
-                    for (int i = 0, n = numParams - paramTypeSignatures.size(); i < n; i++) {
-                        // Left-pad with nulls
-                        paramTypeSignaturesAligned.add(null);
+                List<TypeSignature> paramTypeSignaturesAligned = null;
+                if (paramTypeSignatures != null && paramTypeSignatures.size() > 0) {
+                    if (paramTypeSignatures.size() == numParams) {
+                        // No alignment necessary
+                        paramTypeSignaturesAligned = paramTypeSignatures;
+                    } else {
+                        // Right-align when not the right length
+                        paramTypeSignaturesAligned = new ArrayList<>(numParams);
+                        for (int i = 0, lenDiff = numParams - paramTypeSignatures.size(); i < lenDiff; i++) {
+                            // Left-pad with nulls
+                            paramTypeSignaturesAligned.add(null);
+                        }
+                        paramTypeSignaturesAligned.addAll(paramTypeSignatures);
                     }
-                    paramTypeSignaturesAligned.addAll(paramTypeSignatures);
                 }
-            }
+                List<TypeSignature> paramTypeDescriptorsAligned = null;
+                if (paramTypeDescriptors != null && paramTypeDescriptors.size() > 0) {
+                    if (paramTypeDescriptors.size() == numParams) {
+                        // No alignment necessary
+                        paramTypeDescriptorsAligned = paramTypeDescriptors;
+                    } else {
+                        // Right-align when not the right length
+                        paramTypeDescriptorsAligned = new ArrayList<>(numParams);
+                        for (int i = 0, lenDiff = numParams - paramTypeDescriptors.size(); i < lenDiff; i++) {
+                            // Left-pad with nulls
+                            paramTypeDescriptorsAligned.add(null);
+                        }
+                        paramTypeDescriptorsAligned.addAll(paramTypeDescriptors);
+                    }
+                }
 
-            // Generate MethodParameterInfo entries
-            parameterInfo = new MethodParameterInfo[numParams];
-            for (int i = 0; i < numParams; i++) {
-                parameterInfo[i] = new MethodParameterInfo(this,
-                        paramAnnotationInfoAligned == null ? null : paramAnnotationInfoAligned[i],
-                        paramModifiersAligned == null ? 0 : paramModifiersAligned[i], paramTypeDescriptors.get(i),
-                        paramTypeSignaturesAligned == null ? null : paramTypeSignaturesAligned.get(i),
-                        paramNamesAligned == null ? null : paramNamesAligned[i]);
-                parameterInfo[i].setScanResult(scanResult);
+                // Generate MethodParameterInfo entries
+                parameterInfo = new MethodParameterInfo[numParams];
+                for (int i = 0; i < numParams; i++) {
+                    parameterInfo[i] = new MethodParameterInfo(this,
+                            paramAnnotationInfoAligned == null ? null : paramAnnotationInfoAligned[i],
+                            paramModifiersAligned == null ? 0 : paramModifiersAligned[i],
+                            paramTypeDescriptorsAligned == null ? null : paramTypeDescriptorsAligned.get(i),
+                            paramTypeSignaturesAligned == null ? null : paramTypeSignaturesAligned.get(i),
+                            paramNamesAligned == null ? null : paramNamesAligned[i]);
+                    parameterInfo[i].setScanResult(scanResult);
+                }
             }
+            return parameterInfo;
         }
-        return parameterInfo;
     }
 
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Get a list of annotations on this method, along with any annotation parameter values.
-     * 
-     * @return a list of annotations on this method, along with any annotation parameter values, wrapped in
-     *         {@link AnnotationInfo} objects, or the empty list if none.
-     */
-    public AnnotationInfoList getAnnotationInfo() {
-        if (!scanResult.scanSpec.enableAnnotationInfo) {
-            throw new IllegalArgumentException("Please call ClassGraph#enableAnnotationInfo() before #scan()");
-        }
-        return annotationInfo == null ? AnnotationInfoList.EMPTY_LIST
-                : AnnotationInfoList.getIndirectAnnotations(annotationInfo, /* annotatedClass = */ null);
-    }
-
-    /**
-     * Get a the named non-{@link Repeatable} annotation on this method, or null if the method does not have the
-     * named annotation. (Use {@link #getAnnotationInfoRepeatable(String)} for {@link Repeatable} annotations.)
-     * 
-     * @param annotationName
-     *            The annotation name.
-     * @return An {@link AnnotationInfo} object representing the named annotation on this method, or null if the
-     *         method does not have the named annotation.
-     */
-    public AnnotationInfo getAnnotationInfo(final String annotationName) {
-        return getAnnotationInfo().get(annotationName);
-    }
-
-    /**
-     * Get a the named {@link Repeatable} annotation on this method, or the empty list if the method does not have
-     * the named annotation.
-     * 
-     * @param annotationName
-     *            The annotation name.
-     * @return An {@link AnnotationInfoList} containing all instances of the named annotation on this method, or the
-     *         empty list if the method does not have the named annotation.
-     */
-    public AnnotationInfoList getAnnotationInfoRepeatable(final String annotationName) {
-        return getAnnotationInfo().getRepeatable(annotationName);
-    }
-
-    /**
-     * Check if this method has the named annotation.
+     * Check if this method has a parameter with the annotation.
      *
-     * @param annotationName
-     *            The name of an annotation.
-     * @return true if this method has the named annotation.
+     * @param annotation
+     *            The method parameter annotation.
+     * @return true if this method has a parameter with the annotation.
      */
-    public boolean hasAnnotation(final String annotationName) {
-        return getAnnotationInfo().containsName(annotationName);
+    public boolean hasParameterAnnotation(final Class<? extends Annotation> annotation) {
+        Assert.isAnnotation(annotation);
+        return hasParameterAnnotation(annotation.getName());
     }
 
     /**
@@ -573,27 +625,104 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
     // -------------------------------------------------------------------------------------------------------------
 
     /**
-     * Load the class this method is associated with, and get the {@link Method} reference for this method.
+     * Load and return the classes of each of the method parameters.
      * 
-     * @return The {@link Method} reference for this field.
-     * @throws IllegalArgumentException
-     *             if the method does not exist.
+     * @return An array of the {@link Class} references for each method parameter.
      */
-    public Method loadClassAndGetMethod() throws IllegalArgumentException {
+    private Class<?>[] loadParameterClasses() {
         final MethodParameterInfo[] allParameterInfo = getParameterInfo();
         final List<Class<?>> parameterClasses = new ArrayList<>(allParameterInfo.length);
         for (final MethodParameterInfo mpi : allParameterInfo) {
             final TypeSignature parameterType = mpi.getTypeSignatureOrTypeDescriptor();
-            parameterClasses.add(parameterType.loadClass());
+            TypeSignature actualParameterType;
+            if (parameterType instanceof TypeVariableSignature) {
+                final TypeVariableSignature tvs = (TypeVariableSignature) parameterType;
+                final TypeParameter t = tvs.resolve();
+                if (t.classBound != null) {
+                    // Use class bound of type variable as concrete type, if available,
+                    // in preference to using first interface bound (ignores interface
+                    // bound(s), if present)
+                    actualParameterType = t.classBound;
+                } else if (t.interfaceBounds != null && !t.interfaceBounds.isEmpty()) {
+                    // Use first interface bound of type variable as concrete type
+                    // (ignores 2nd and subsequent interface bound(s), if present)
+                    actualParameterType = t.interfaceBounds.get(0);
+                } else {
+                    // Sanity check, should not happen
+                    throw new IllegalArgumentException("TypeVariableSignature has no bounds");
+                }
+            } else {
+                actualParameterType = parameterType;
+            }
+            parameterClasses.add(actualParameterType.loadClass());
         }
-        final Class<?>[] parameterClassesArr = parameterClasses.toArray(new Class<?>[0]);
+        return parameterClasses.toArray(new Class<?>[0]);
+    }
+
+    /**
+     * Load the class this method is associated with, and get the {@link Method} reference for this method. Only
+     * call this if {@link #isConstructor()} returns false, otherwise an {@link IllegalArgumentException} will be
+     * thrown. Instead call {@link #loadClassAndGetConstructor()} for constructors.
+     * 
+     * @return The {@link Method} reference for this method.
+     * @throws IllegalArgumentException
+     *             <ul>
+     *             <li>If the method's class can't be loaded</li>
+     *             <li>If the method does not exist</li>
+     *             <li>If the method is a constructor</li>
+     *             <li>If one of the method's parameters references an unknown class</li>
+     *             <li>If the method's return type references an unknown class</li>
+     *             </ul>
+     */
+    public Method loadClassAndGetMethod() throws IllegalArgumentException {
+        if (isConstructor()) {
+            throw new IllegalArgumentException(
+                    "Need to call loadClassAndGetConstructor() for constructors, not loadClassAndGetMethod()");
+        }
+        final Class<?>[] parameterClassesArr = loadParameterClasses();
         try {
             return loadClass().getMethod(getName(), parameterClassesArr);
         } catch (final NoSuchMethodException e1) {
             try {
                 return loadClass().getDeclaredMethod(getName(), parameterClassesArr);
-            } catch (final NoSuchMethodException es2) {
-                throw new IllegalArgumentException("No such method: " + getClassName() + "." + getName());
+            } catch (final NoSuchMethodException e2) {
+                throw new IllegalArgumentException("Method not found: " + getClassName() + "." + getName());
+            }
+        } catch (final NoClassDefFoundError e3) {
+            // The method returns an unknown class
+            throw new IllegalArgumentException("Could not load method: " + getClassName() + "." + getName(), e3);
+        }
+    }
+
+    /**
+     * Load the class this constructor is associated with, and get the {@link Constructor} reference for this
+     * constructor. Only call this if {@link #isConstructor()} returns true, otherwise an
+     * {@link IllegalArgumentException} will be thrown. Instead call {@link #loadClassAndGetMethod()} for non-method
+     * constructors.
+     * 
+     * @return The {@link Constructor} reference for this constructor.
+     * @throws IllegalArgumentException
+     *             <ul>
+     *             <li>If the method's class can't be loaded</li>
+     *             <li>If the constructor does not exist</li>
+     *             <li>If the method is not a constructor</li>
+     *             <li>If one of the constructor's parameters references an unknown class</li>
+     *             </ul>
+     */
+    public Constructor<?> loadClassAndGetConstructor() throws IllegalArgumentException {
+        if (!isConstructor()) {
+            throw new IllegalArgumentException(
+                    "Need to call loadClassAndGetMethod() for non-constructor methods, not "
+                            + "loadClassAndGetConstructor()");
+        }
+        final Class<?>[] parameterClassesArr = loadParameterClasses();
+        try {
+            return loadClass().getConstructor(parameterClassesArr);
+        } catch (final NoSuchMethodException e1) {
+            try {
+                return loadClass().getDeclaredConstructor(parameterClassesArr);
+            } catch (final NoSuchMethodException e2) {
+                throw new IllegalArgumentException("Constructor not found for class " + getClassName());
             }
         }
     }
@@ -625,9 +754,7 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
                     }
                     if (hasRepeatableAnnotation) {
                         final AnnotationInfoList aiList = new AnnotationInfoList(pai.length);
-                        for (final AnnotationInfo ai : pai) {
-                            aiList.add(ai);
-                        }
+                        aiList.addAll(Arrays.asList(pai));
                         aiList.handleRepeatableAnnotations(allRepeatableAnnotationNames, getClassInfo(),
                                 RelType.METHOD_PARAMETER_ANNOTATIONS,
                                 RelType.CLASSES_WITH_METHOD_PARAMETER_ANNOTATION,
@@ -640,17 +767,6 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
     }
 
     // -------------------------------------------------------------------------------------------------------------
-
-    /**
-     * Returns the declaring class name, so that super.getClassInfo() returns the {@link ClassInfo} object for the
-     * declaring class.
-     *
-     * @return the class name
-     */
-    @Override
-    protected String getClassName() {
-        return declaringClassName;
-    }
 
     /* (non-Javadoc)
      * @see io.github.classgraph.ScanResultObject#setScanResult(io.github.classgraph.ScanResult)
@@ -683,6 +799,13 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
                 mpi.setScanResult(scanResult);
             }
         }
+        if (this.thrownExceptions != null) {
+            for (final ClassInfo thrownException : thrownExceptions) {
+                if (thrownException.scanResult == null) { // Prevent infinite loop
+                    thrownException.setScanResult(scanResult);
+                }
+            }
+        }
     }
 
     /**
@@ -695,25 +818,47 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      */
     @Override
     protected void findReferencedClassInfo(final Map<String, ClassInfo> classNameToClassInfo,
-            final Set<ClassInfo> refdClassInfo) {
-        final MethodTypeSignature methodSig = getTypeSignature();
-        if (methodSig != null) {
-            methodSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+            final Set<ClassInfo> refdClassInfo, final LogNode log) {
+        try {
+            final MethodTypeSignature methodSig = getTypeSignature();
+            if (methodSig != null) {
+                methodSig.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+            }
+        } catch (final IllegalArgumentException e) {
+            if (log != null) {
+                log.log("Illegal type signature for method " + getClassName() + "." + getName() + ": "
+                        + getTypeSignatureStr());
+            }
         }
-        final MethodTypeSignature methodDesc = getTypeDescriptor();
-        if (methodDesc != null) {
-            methodDesc.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+        try {
+            final MethodTypeSignature methodDesc = getTypeDescriptor();
+            if (methodDesc != null) {
+                methodDesc.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+            }
+        } catch (final IllegalArgumentException e) {
+            if (log != null) {
+                log.log("Illegal type descriptor for method " + getClassName() + "." + getName() + ": "
+                        + getTypeDescriptorStr());
+            }
         }
         if (annotationInfo != null) {
             for (final AnnotationInfo ai : annotationInfo) {
-                ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+                ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
             }
         }
         for (final MethodParameterInfo mpi : getParameterInfo()) {
             final AnnotationInfo[] aiArr = mpi.annotationInfo;
             if (aiArr != null) {
                 for (final AnnotationInfo ai : aiArr) {
-                    ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo);
+                    ai.findReferencedClassInfo(classNameToClassInfo, refdClassInfo, log);
+                }
+            }
+        }
+        if (thrownExceptionNames != null) {
+            final ClassInfoList thrownExceptions = getThrownExceptions();
+            if (thrownExceptions != null) {
+                for (int i = 0; i < thrownExceptions.size(); i++) {
+                    classNameToClassInfo.put(thrownExceptionNames[i], thrownExceptions.get(i));
                 }
             }
         }
@@ -776,20 +921,21 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
      * Get a string representation of the method. Note that constructors are named {@code "<init>"}, and private
      * static class initializer blocks are named {@code "<clinit>"}.
      *
-     * @return the string representation of the method.
+     * @param useSimpleNames
+     *            the use simple names
+     * @param buf
+     *            the buf
      */
     @Override
-    public String toString() {
+    protected void toString(final boolean useSimpleNames, final StringBuilder buf) {
         final MethodTypeSignature methodType = getTypeSignatureOrTypeDescriptor();
-
-        final StringBuilder buf = new StringBuilder();
 
         if (annotationInfo != null) {
             for (final AnnotationInfo annotation : annotationInfo) {
                 if (buf.length() > 0) {
                     buf.append(' ');
                 }
-                annotation.toString(buf);
+                annotation.toString(useSimpleNames, buf);
             }
         }
 
@@ -810,8 +956,7 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
                 if (i > 0) {
                     buf.append(", ");
                 }
-                final String typeParamStr = typeParameters.get(i).toString();
-                buf.append(typeParamStr);
+                typeParameters.get(i).toString(useSimpleNames, buf);
             }
             buf.append('>');
         }
@@ -820,12 +965,15 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
             if (buf.length() > 0) {
                 buf.append(' ');
             }
-            buf.append(methodType.getResultType().toString());
+            methodType.getResultType().toStringInternal(useSimpleNames, /* annotationsToExclude = */ annotationInfo,
+                    buf);
         }
 
-        buf.append(' ');
+        if (buf.length() > 0) {
+            buf.append(' ');
+        }
         if (name != null) {
-            buf.append(name);
+            buf.append(useSimpleNames ? ClassInfo.getSimpleName(name) : name);
         }
 
         // If at least one param is named, then use placeholder names for unnamed params,
@@ -865,51 +1013,79 @@ public class MethodInfo extends ScanResultObject implements Comparable<MethodInf
 
             if (paramInfo.annotationInfo != null) {
                 for (final AnnotationInfo ai : paramInfo.annotationInfo) {
-                    ai.toString(buf);
+                    ai.toString(useSimpleNames, buf);
                     buf.append(' ');
                 }
             }
 
             MethodParameterInfo.modifiersToString(paramInfo.getModifiers(), buf);
 
-            final TypeSignature paramType = paramInfo.getTypeSignatureOrTypeDescriptor();
-            if (i == varArgsParamIndex) {
-                // Show varargs params correctly -- replace last "[]" with "..."
-                if (!(paramType instanceof ArrayTypeSignature)) {
-                    throw new IllegalArgumentException(
-                            "Got non-array type for last parameter of varargs method " + name);
+            final TypeSignature paramTypeSignature = paramInfo.getTypeSignatureOrTypeDescriptor();
+            // Param type signature may be null in the case of a `synthetic`, `bridge`, or `mandated` parameter
+            // implicitly added to a non-generic method
+            if (paramTypeSignature != null) {
+                if (i == varArgsParamIndex) {
+                    // Show varargs params correctly -- replace last "[]" with "..."
+                    if (!(paramTypeSignature instanceof ArrayTypeSignature)) {
+                        throw new IllegalArgumentException(
+                                "Got non-array type for last parameter of varargs method " + name);
+                    }
+                    final ArrayTypeSignature arrayType = (ArrayTypeSignature) paramTypeSignature;
+                    if (arrayType.getNumDimensions() == 0) {
+                        throw new IllegalArgumentException(
+                                "Got a zero-dimension array type for last parameter of varargs method " + name);
+                    }
+                    arrayType.getElementTypeSignature().toString(useSimpleNames, buf);
+                    for (int j = 0; j < arrayType.getNumDimensions() - 1; j++) {
+                        buf.append("[]");
+                    }
+                    buf.append("...");
+                } else {
+                    // Exclude parameter annotations from type annotations at toplevel of type signature,
+                    // so that annotation is not listed twice
+                    final AnnotationInfoList annotationsToExclude;
+                    if (paramInfo.annotationInfo == null || paramInfo.annotationInfo.length == 0) {
+                        annotationsToExclude = null;
+                    } else {
+                        annotationsToExclude = new AnnotationInfoList(paramInfo.annotationInfo.length);
+                        annotationsToExclude.addAll(Arrays.asList(paramInfo.annotationInfo));
+                    }
+                    paramTypeSignature.toStringInternal(useSimpleNames, annotationsToExclude, buf);
                 }
-                final ArrayTypeSignature arrayType = (ArrayTypeSignature) paramType;
-                if (arrayType.getNumDimensions() == 0) {
-                    throw new IllegalArgumentException(
-                            "Got a zero-dimension array type for last parameter of varargs method " + name);
-                }
-                buf.append(new ArrayTypeSignature(arrayType.getElementTypeSignature(),
-                        arrayType.getNumDimensions() - 1, /* unused */ null).toString());
-                buf.append("...");
-            } else {
-                buf.append(paramType.toString());
             }
 
             if (hasParamNames) {
                 final String paramName = paramInfo.getName();
                 if (paramName != null) {
-                    buf.append(' ');
+                    if (buf.charAt(buf.length() - 1) != ' ') {
+                        buf.append(' ');
+                    }
                     buf.append(paramName);
                 }
             }
         }
         buf.append(')');
 
+        // when throws signature is present, it includes both generic type variables and class names
         if (!methodType.getThrowsSignatures().isEmpty()) {
             buf.append(" throws ");
             for (int i = 0; i < methodType.getThrowsSignatures().size(); i++) {
                 if (i > 0) {
                     buf.append(", ");
                 }
-                buf.append(methodType.getThrowsSignatures().get(i).toString());
+                methodType.getThrowsSignatures().get(i).toString(useSimpleNames, buf);
+            }
+        } else {
+            if (thrownExceptionNames != null && thrownExceptionNames.length > 0) {
+                buf.append(" throws ");
+                for (int i = 0; i < thrownExceptionNames.length; i++) {
+                    if (i > 0) {
+                        buf.append(", ");
+                    }
+                    buf.append(useSimpleNames ? ClassInfo.getSimpleName(thrownExceptionNames[i])
+                            : thrownExceptionNames[i]);
+                }
             }
         }
-        return buf.toString();
     }
 }

@@ -43,7 +43,7 @@ import java.util.Map.Entry;
 import java.util.Set;
 import java.util.concurrent.atomic.AtomicInteger;
 
-import io.github.classgraph.ClassGraphException;
+import nonapi.io.github.classgraph.reflection.ReflectionUtils;
 import nonapi.io.github.classgraph.utils.CollectionUtils;
 
 /**
@@ -94,14 +94,14 @@ public final class JSONSerializer {
             final Object refdObj = ((JSONReference) jsonVal).idObject;
             if (refdObj == null) {
                 // Should not happen
-                throw ClassGraphException.newClassGraphException("Internal inconsistency");
+                throw new RuntimeException("Internal inconsistency");
             }
             // Look up the JSON object corresponding to the referenced object
             final ReferenceEqualityKey<Object> refdObjKey = new ReferenceEqualityKey<>(refdObj);
             final JSONObject refdJsonVal = objToJSONVal.get(refdObjKey);
             if (refdJsonVal == null) {
                 // Should not happen
-                throw ClassGraphException.newClassGraphException("Internal inconsistency");
+                throw new RuntimeException("Internal inconsistency");
             }
             // See if the JSON object has an @Id field
             // (for serialization, typeResolutions can be null)
@@ -367,36 +367,36 @@ public final class JSONSerializer {
 
         } else {
             // A standard object -- serialize fields as a JSON associative array.
-            try {
-                // Cache class fields to include in serialization (typeResolutions can be null,
-                // since it's not necessary to resolve type parameters during serialization)
-                final ClassFields resolvedFields = classFieldCache.get(cls);
-                final List<FieldTypeInfo> fieldOrder = resolvedFields.fieldOrder;
-                final int n = fieldOrder.size();
+            // Cache class fields to include in serialization (typeResolutions can be null,
+            // since it's not necessary to resolve type parameters during serialization)
+            final ClassFields resolvedFields = classFieldCache.get(cls);
+            final List<FieldTypeInfo> fieldOrder = resolvedFields.fieldOrder;
+            final int n = fieldOrder.size();
 
-                // Convert field values to JSON values
-                final String[] fieldNames = new String[n];
-                final Object[] convertedVals = new Object[n];
-                for (int i = 0; i < n; i++) {
-                    final FieldTypeInfo fieldInfo = fieldOrder.get(i);
-                    final Field field = fieldInfo.field;
-                    fieldNames[i] = field.getName();
+            // Convert field values to JSON values
+            final String[] fieldNames = new String[n];
+            final Object[] convertedVals = new Object[n];
+            for (int i = 0; i < n; i++) {
+                final FieldTypeInfo fieldTypeInfo = fieldOrder.get(i);
+                final Field field = fieldTypeInfo.field;
+                fieldNames[i] = field.getName();
+                try {
                     convertedVals[i] = JSONUtils.getFieldValue(obj, field);
+                } catch (IllegalArgumentException | IllegalAccessException e) {
+                    throw new RuntimeException("Could not get value of field \"" + fieldNames[i]
+                            + "\" in object of class " + obj.getClass().getName(), e);
                 }
-                convertVals(convertedVals, visitedOnPath, standardObjectVisited, classFieldCache, objToJSONVal,
-                        onlySerializePublicFields);
-
-                // Create new JSON object representing the standard object
-                final List<Entry<String, Object>> convertedKeyValPairs = new ArrayList<>(n);
-                for (int i = 0; i < n; i++) {
-                    convertedKeyValPairs.add(new SimpleEntry(fieldNames[i], convertedVals[i]));
-                }
-                jsonVal = new JSONObject(convertedKeyValPairs);
-
-            } catch (IllegalArgumentException | IllegalAccessException e) {
-                throw ClassGraphException.newClassGraphException("Could not get value of field in object: " + obj,
-                        e);
             }
+            convertVals(convertedVals, visitedOnPath, standardObjectVisited, classFieldCache, objToJSONVal,
+                    onlySerializePublicFields);
+
+            // Create new JSON object representing the standard object
+            final List<Entry<String, Object>> convertedKeyValPairs = new ArrayList<>(n);
+            for (int i = 0; i < n; i++) {
+                convertedKeyValPairs.add(new SimpleEntry(fieldNames[i], convertedVals[i]));
+            }
+            jsonVal = new JSONObject(convertedKeyValPairs);
+
         }
 
         // In the case of a DAG, just serialize the same object multiple times, i.e. remove obj
@@ -457,7 +457,7 @@ public final class JSONSerializer {
         } else {
             // Serialize a numeric or Boolean type (Integer, Long, Short, Float, Double, Boolean, Byte) to string
             // (doesn't need quoting or escaping)
-            buf.append(jsonVal.toString());
+            buf.append(jsonVal);
         }
     }
 
@@ -516,9 +516,29 @@ public final class JSONSerializer {
      *             If anything goes wrong during serialization.
      */
     public static String serializeObject(final Object obj, final int indentWidth,
+            final boolean onlySerializePublicFields, final ReflectionUtils reflectionUtils) {
+        return serializeObject(obj, indentWidth, onlySerializePublicFields, new ClassFieldCache(
+                /* resolveTypes = */ false, /* onlySerializePublicFields = */ false, reflectionUtils));
+    }
+
+    /**
+     * Recursively serialize an Object (or array, list, map or set of objects) to JSON, skipping transient and final
+     * fields.
+     * 
+     * @param obj
+     *            The root object of the object graph to serialize.
+     * @param indentWidth
+     *            If indentWidth == 0, no prettyprinting indentation is performed, otherwise this specifies the
+     *            number of spaces to indent each level of JSON.
+     * @param onlySerializePublicFields
+     *            If true, only serialize public fields.
+     * @return The object graph in JSON form.
+     * @throws IllegalArgumentException
+     *             If anything goes wrong during serialization.
+     */
+    public static String serializeObject(final Object obj, final int indentWidth,
             final boolean onlySerializePublicFields) {
-        return serializeObject(obj, indentWidth, onlySerializePublicFields,
-                new ClassFieldCache(/* resolveTypes = */ false, /* onlySerializePublicFields = */ false));
+        return serializeObject(obj, indentWidth, onlySerializePublicFields, new ReflectionUtils());
     }
 
     /**
@@ -563,7 +583,8 @@ public final class JSONSerializer {
                     + " does not have a field named \"" + fieldName + "\"");
         }
         final Field field = fieldResolvedTypeInfo.field;
-        if (!JSONUtils.fieldIsSerializable(field, /* onlySerializePublicFields = */ false)) {
+        if (!JSONUtils.fieldIsSerializable(field, /* onlySerializePublicFields = */ false,
+                classFieldCache.reflectionUtils)) {
             throw new IllegalArgumentException("Field " + containingObject.getClass().getName() + "." + fieldName
                     + " needs to be accessible, non-transient, and non-final");
         }
@@ -588,16 +609,40 @@ public final class JSONSerializer {
      *            number of spaces to indent each level of JSON.
      * @param onlySerializePublicFields
      *            If true, only serialize public fields.
+     * @param reflectionUtils
+     *            The reflection driver.
+     * @return The object graph in JSON form.
+     * @throws IllegalArgumentException
+     *             If anything goes wrong during serialization.
+     */
+    public static String serializeFromField(final Object containingObject, final String fieldName,
+            final int indentWidth, final boolean onlySerializePublicFields, final ReflectionUtils reflectionUtils) {
+        // Don't need to resolve types during serialization
+        final ClassFieldCache classFieldCache = new ClassFieldCache(/* resolveTypes = */ false,
+                onlySerializePublicFields, reflectionUtils);
+        return serializeFromField(containingObject, fieldName, indentWidth, onlySerializePublicFields,
+                classFieldCache);
+    }
+
+    /**
+     * Recursively serialize the named field of an object, skipping transient and final fields.
+     * 
+     * @param containingObject
+     *            The object containing the field value to serialize.
+     * @param fieldName
+     *            The name of the field to serialize.
+     * @param indentWidth
+     *            If indentWidth == 0, no prettyprinting indentation is performed, otherwise this specifies the
+     *            number of spaces to indent each level of JSON.
+     * @param onlySerializePublicFields
+     *            If true, only serialize public fields.
      * @return The object graph in JSON form.
      * @throws IllegalArgumentException
      *             If anything goes wrong during serialization.
      */
     public static String serializeFromField(final Object containingObject, final String fieldName,
             final int indentWidth, final boolean onlySerializePublicFields) {
-        // Don't need to resolve types during serialization
-        final ClassFieldCache classFieldCache = new ClassFieldCache(/* resolveTypes = */ false,
-                onlySerializePublicFields);
         return serializeFromField(containingObject, fieldName, indentWidth, onlySerializePublicFields,
-                classFieldCache);
+                new ReflectionUtils());
     }
 }
